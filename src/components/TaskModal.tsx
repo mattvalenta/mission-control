@@ -1,12 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { X, Save, Trash2, Activity, Package, Bot, ClipboardList } from 'lucide-react';
+import { X, Save, Trash2, Activity, Package, Bot, ClipboardList, Plus } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { ActivityLog } from './ActivityLog';
 import { DeliverablesList } from './DeliverablesList';
 import { SessionsList } from './SessionsList';
 import { PlanningTab } from './PlanningTab';
+import { AgentModal } from './AgentModal';
 import type { Task, TaskPriority, TaskStatus } from '@/lib/types';
 
 type TabType = 'overview' | 'planning' | 'activity' | 'deliverables' | 'sessions';
@@ -20,6 +21,7 @@ interface TaskModalProps {
 export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showAgentModal, setShowAgentModal] = useState(false);
   // Auto-switch to planning tab if task is in planning status
   const [activeTab, setActiveTab] = useState<TabType>(task?.status === 'planning' ? 'planning' : 'overview');
 
@@ -209,7 +211,13 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
             <label className="block text-sm font-medium mb-1">Assign to</label>
             <select
               value={form.assigned_agent_id}
-              onChange={(e) => setForm({ ...form, assigned_agent_id: e.target.value })}
+              onChange={(e) => {
+                if (e.target.value === '__add_new__') {
+                  setShowAgentModal(true);
+                } else {
+                  setForm({ ...form, assigned_agent_id: e.target.value });
+                }
+              }}
               className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
             >
               <option value="">Unassigned</option>
@@ -218,6 +226,9 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
                   {agent.avatar_emoji} {agent.name} - {agent.role}
                 </option>
               ))}
+              <option value="__add_new__" className="text-mc-accent">
+                ➕ Add new agent...
+              </option>
             </select>
           </div>
 
@@ -298,6 +309,19 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
           </div>
         )}
       </div>
+
+      {/* Nested Agent Modal for inline agent creation */}
+      {showAgentModal && (
+        <AgentModal
+          workspaceId={workspaceId}
+          onClose={() => setShowAgentModal(false)}
+          onAgentCreated={(agentId) => {
+            // Auto-select the newly created agent
+            setForm({ ...form, assigned_agent_id: agentId });
+            setShowAgentModal(false);
+          }}
+        />
+      )}
     </div>
   );
 }

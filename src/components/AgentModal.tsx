@@ -9,11 +9,12 @@ interface AgentModalProps {
   agent?: Agent;
   onClose: () => void;
   workspaceId?: string;
+  onAgentCreated?: (agentId: string) => void;
 }
 
 const EMOJI_OPTIONS = ['🤖', '🦞', '💻', '🔍', '✍️', '🎨', '📊', '🧠', '⚡', '🚀', '🎯', '🔧'];
 
-export function AgentModal({ agent, onClose, workspaceId }: AgentModalProps) {
+export function AgentModal({ agent, onClose, workspaceId, onAgentCreated }: AgentModalProps) {
   const { addAgent, updateAgent, agents } = useMissionControl();
   const [activeTab, setActiveTab] = useState<'info' | 'soul' | 'user' | 'agents'>('info');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,6 +54,10 @@ export function AgentModal({ agent, onClose, workspaceId }: AgentModalProps) {
           updateAgent(savedAgent);
         } else {
           addAgent(savedAgent);
+          // Notify parent if callback provided (e.g., for inline agent creation)
+          if (onAgentCreated) {
+            onAgentCreated(savedAgent.id);
+          }
         }
         onClose();
       }
