@@ -148,7 +148,8 @@ If you need help or clarification, ask me (Charlie).`;
       const sessionKey = `agent:main:${session.openclaw_session_id}`;
       await client.call('chat.send', {
         sessionKey,
-        message: taskMessage
+        message: taskMessage,
+        idempotencyKey: `dispatch-${task.id}-${Date.now()}`
       });
 
       // Update task status to in_progress
