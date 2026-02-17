@@ -154,12 +154,15 @@ Respond with ONLY valid JSON in this format:
       await client.connect();
     }
 
-    // Send planning request to the planning session
-    await client.call('chat.send', {
+    // Send planning request to the planning session using agent RPC
+    // This triggers an actual AI agent turn, unlike chat.send which is for messaging
+    const agentResult = await client.call<{ runId: string; acceptedAt: string }>('agent', {
       sessionKey: sessionKey,
       message: planningPrompt,
       idempotencyKey: `planning-start-${taskId}-${Date.now()}`,
     });
+
+    console.log('[Planning] Agent triggered:', agentResult);
 
     // Store the session key and initial message
     const messages = [{ role: 'user', content: planningPrompt, timestamp: Date.now() }];

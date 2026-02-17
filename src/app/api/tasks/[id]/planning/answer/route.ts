@@ -96,12 +96,13 @@ If planning is complete, respond with JSON:
     console.log('[Planning Answer] Answer text:', answerText);
 
     try {
-      const sendResult = await client.call('chat.send', {
+      // Use agent RPC to trigger AI response (not chat.send which is just messaging)
+      const sendResult = await client.call('agent', {
         sessionKey: task.planning_session_key,
         message: answerPrompt,
         idempotencyKey: `planning-answer-${taskId}-${Date.now()}`,
       });
-      console.log('[Planning Answer] Send successful, result:', sendResult);
+      console.log('[Planning Answer] Agent triggered, result:', sendResult);
     } catch (sendError) {
       console.error('[Planning Answer] Failed to send to OpenClaw:', sendError);
       return NextResponse.json({ error: 'Failed to send answer to orchestrator: ' + (sendError as Error).message }, { status: 500 });
