@@ -9,7 +9,29 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Dark theme colors matching the screenshot
+        // Primary Agent Colors (from spec Appendix B)
+        'skippy-gold': '#FFD700',
+        'dev-blue': '#3B82F6',
+        'marketing-green': '#10B981',
+        'insights-purple': '#8B5CF6',
+        
+        // Status Colors (from spec Appendix B)
+        'status-active': '#22C55E',
+        'status-idle': '#F59E0B',
+        'status-on-demand': '#6B7280',
+        'status-offline': '#EF4444',
+        
+        // Background Colors (from spec Appendix B)
+        'bg-primary': '#0F172A',
+        'bg-secondary': '#1E293B',
+        'bg-tertiary': '#334155',
+        
+        // Text Colors (from spec Appendix B)
+        'text-primary': '#F8FAFC',
+        'text-secondary': '#94A3B8',
+        'text-muted': '#64748B',
+        
+        // Legacy compatibility
         'mc-bg': '#0d1117',
         'mc-bg-secondary': '#161b22',
         'mc-bg-tertiary': '#21262d',
@@ -26,6 +48,9 @@ const config: Config = {
       },
       fontFamily: {
         mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
+      },
+      animation: {
+        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
       },
     },
   },
