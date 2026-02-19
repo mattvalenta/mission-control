@@ -181,6 +181,142 @@ const migrations: Migration[] = [
         console.log('[Migration 006] Added planning_dispatch_error to tasks');
       }
     }
+  },
+  {
+    id: '007',
+    name: 'add_agent_registry_columns',
+    up: (db) => {
+      console.log('[Migration 007] Adding agent registry columns...');
+
+      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
+
+      const columns = [
+        { name: 'webhook_url', sql: 'ALTER TABLE agents ADD COLUMN webhook_url TEXT' },
+        { name: 'machine_hostname', sql: 'ALTER TABLE agents ADD COLUMN machine_hostname TEXT' },
+        { name: 'openclaw_host', sql: 'ALTER TABLE agents ADD COLUMN openclaw_host TEXT' },
+        { name: 'poll_interval_ms', sql: 'ALTER TABLE agents ADD COLUMN poll_interval_ms INTEGER DEFAULT 30000' },
+        { name: 'capabilities', sql: 'ALTER TABLE agents ADD COLUMN capabilities TEXT' },
+        { name: 'last_heartbeat', sql: 'ALTER TABLE agents ADD COLUMN last_heartbeat TEXT' },
+      ];
+
+      for (const col of columns) {
+        if (!agentsInfo.some(c => c.name === col.name)) {
+          try {
+            db.exec(col.sql);
+            console.log(`[Migration 007] Added ${col.name} to agents`);
+          } catch (e) {
+            console.log(`[Migration 007] Column ${col.name} may already exist`);
+          }
+        }
+      }
+    }
+  },
+  {
+    id: '008',
+    name: 'mission_control_enhancements',
+    up: (db) => {
+      console.log('[Migration 008] Adding Mission Control enhancements...');
+
+      // Add tier columns to tasks
+      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+      
+      if (!tasksInfo.some(col => col.name === 'tier')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN tier TEXT DEFAULT 'manager'`);
+        console.log('[Migration 008] Added tier to tasks');
+      }
+      if (!tasksInfo.some(col => col.name === 'manager_id')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN manager_id TEXT`);
+        console.log('[Migration 008] Added manager_id to tasks');
+      }
+      if (!tasksInfo.some(col => col.name === 'subagent_type')) {
+        db.exec(`ALTER TABLE tasks ADD COLUMN subagent_type TEXT`);
+        console.log('[Migration 008] Added subagent_type to tasks');
+      }
+
+      // Create content_items table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS content_items (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          type TEXT NOT NULL CHECK (type IN ('linkedin_post', 'x_post', 'x_thread', 'carousel', 'blog')),
+          platform TEXT NOT NULL CHECK (platform IN ('linkedin', 'x', 'facebook', 'instagram')),
+          stage TEXT NOT NULL DEFAULT 'idea' CHECK (stage IN ('idea', 'research', 'draft', 'humanize', 'schedule', 'publish', 'analysis')),
+          content TEXT,
+          research TEXT,
+          schedule TEXT,
+          analysis TEXT,
+          assigned_to TEXT,
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now')),
+          published_at TEXT
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_content_items_stage ON content_items(stage)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_content_items_platform ON content_items(platform)`);
+      console.log('[Migration 008] Created content_items table');
+
+      // Create calendar_events table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS calendar_events (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          start_time TEXT NOT NULL,
+          end_time TEXT,
+          type TEXT NOT NULL CHECK (type IN ('cron', 'meeting', 'deadline', 'reminder')),
+          tier TEXT NOT NULL DEFAULT 'manager' CHECK (tier IN ('skippy', 'manager', 'subagent')),
+          agent_id TEXT NOT NULL,
+          agent_name TEXT NOT NULL,
+          color TEXT,
+          recurring TEXT,
+          created_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_time)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_calendar_events_agent ON calendar_events(agent_id)`);
+      console.log('[Migration 008] Created calendar_events table');
+
+      // Create team_members table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS team_members (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          tier TEXT NOT NULL CHECK (tier IN ('skippy', 'manager', 'subagent')),
+          role TEXT NOT NULL,
+          manager_id TEXT REFERENCES team_members(id),
+          status TEXT DEFAULT 'offline' CHECK (status IN ('active', 'idle', 'on-demand', 'offline')),
+          discord_id TEXT,
+          workspace_path TEXT,
+          avatar_emoji TEXT DEFAULT '🤖',
+          created_at TEXT DEFAULT (datetime('now')),
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_team_members_tier ON team_members(tier)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_team_members_manager ON team_members(manager_id)`);
+      console.log('[Migration 008] Created team_members table');
+
+      // Create memory_files table
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_files (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          path TEXT NOT NULL,
+          content TEXT,
+          cached_at TEXT DEFAULT (datetime('now')),
+          FOREIGN KEY (agent_id) REFERENCES team_members(id)
+        );
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_files_agent ON memory_files(agent_id)`);
+      console.log('[Migration 008] Created memory_files table');
+
+      // Create indexes for tasks tier columns
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_tier ON tasks(tier)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_manager ON tasks(manager_id)`);
+      
+      console.log('[Migration 008] Mission Control enhancements complete');
+    }
   }
 ];
 

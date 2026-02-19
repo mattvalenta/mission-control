@@ -62,7 +62,7 @@ export default function OfficePage() {
 
         {/* Lounge Area */}
         <div className="mt-8 rounded-lg bg-slate-700 p-4 text-center text-slate-400">
-          🛋️ Matt's Chair — Empty
+          🛋️ Matt&apos;s Chair — Empty
         </div>
 
         {/* Status Footer */}

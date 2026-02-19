@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if agent already exists by name
-    let existing = queryOne<{ id: string; status: string }>(
+    const existing = queryOne<{ id: string; status: string }>(
       'SELECT id, status FROM agents WHERE name = ?',
       [name]
     );

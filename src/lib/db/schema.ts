@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   planning_spec TEXT,
   planning_agents TEXT,
   planning_dispatch_error TEXT,
+  tier TEXT DEFAULT 'manager' CHECK (tier IN ('skippy', 'manager', 'subagent')),
+  manager_id TEXT,
+  subagent_type TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -169,6 +172,65 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Content pipeline table
+CREATE TABLE IF NOT EXISTS content_items (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('linkedin_post', 'x_post', 'x_thread', 'carousel', 'blog')),
+  platform TEXT NOT NULL CHECK (platform IN ('linkedin', 'x', 'facebook', 'instagram')),
+  stage TEXT NOT NULL DEFAULT 'idea' CHECK (stage IN ('idea', 'research', 'draft', 'humanize', 'schedule', 'publish', 'analysis')),
+  content TEXT,
+  research TEXT,
+  schedule TEXT,
+  analysis TEXT,
+  assigned_to TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  published_at TEXT
+);
+
+-- Calendar events table
+CREATE TABLE IF NOT EXISTS calendar_events (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  description TEXT,
+  start_time TEXT NOT NULL,
+  end_time TEXT,
+  type TEXT NOT NULL CHECK (type IN ('cron', 'meeting', 'deadline', 'reminder')),
+  tier TEXT NOT NULL DEFAULT 'manager' CHECK (tier IN ('skippy', 'manager', 'subagent')),
+  agent_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  color TEXT,
+  recurring TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Team members table
+CREATE TABLE IF NOT EXISTS team_members (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  tier TEXT NOT NULL CHECK (tier IN ('skippy', 'manager', 'subagent')),
+  role TEXT NOT NULL,
+  manager_id TEXT REFERENCES team_members(id),
+  status TEXT DEFAULT 'offline' CHECK (status IN ('active', 'idle', 'on-demand', 'offline')),
+  discord_id TEXT,
+  workspace_path TEXT,
+  avatar_emoji TEXT DEFAULT '🤖',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Memory files cache table
+CREATE TABLE IF NOT EXISTS memory_files (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT,
+  cached_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (agent_id) REFERENCES team_members(id)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
@@ -181,4 +243,13 @@ CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, creat
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
 CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_content_items_stage ON content_items(stage);
+CREATE INDEX IF NOT EXISTS idx_content_items_platform ON content_items(platform);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_time);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_agent ON calendar_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_team_members_tier ON team_members(tier);
+CREATE INDEX IF NOT EXISTS idx_team_members_manager ON team_members(manager_id);
+CREATE INDEX IF NOT EXISTS idx_memory_files_agent ON memory_files(agent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_tier ON tasks(tier);
+CREATE INDEX IF NOT EXISTS idx_tasks_manager ON tasks(manager_id);
 `;

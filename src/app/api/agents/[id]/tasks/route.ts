@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, queryOne, queryAll, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { v4 as uuidv4 } from 'uuid';
+import type { Task } from '@/lib/types';
 
 /**
  * GET /api/agents/[id]/tasks
@@ -104,8 +105,8 @@ export async function POST(
         `, [uuidv4(), task_id, agentId, message || 'Agent claimed task', now]);
 
         // Broadcast update
-        const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [task_id]);
-        if (updatedTask) {
+        const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task_id]);
+        if (updatedTask && updatedTask.id) {
           broadcast({ type: 'task_updated', payload: updatedTask });
         }
 
@@ -133,8 +134,8 @@ export async function POST(
         }
 
         // Broadcast update
-        const task2 = queryOne('SELECT * FROM tasks WHERE id = ?', [task_id]);
-        if (task2) {
+        const task2 = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task_id]);
+        if (task2 && task2.id) {
           broadcast({ type: 'task_updated', payload: task2 });
         }
 
@@ -158,8 +159,8 @@ export async function POST(
         run('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['standby', now, agentId]);
 
         // Broadcast update
-        const task3 = queryOne('SELECT * FROM tasks WHERE id = ?', [task_id]);
-        if (task3) {
+        const task3 = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [task_id]);
+        if (task3 && task3.id) {
           broadcast({ type: 'task_updated', payload: task3 });
         }
 

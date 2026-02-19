@@ -1,7 +1,9 @@
 import { cn } from '@/lib/utils';
 
 interface StatusBadgeProps {
-  status: 'active' | 'idle' | 'on_demand' | 'offline';
+  status: 'active' | 'idle' | 'on-demand' | 'offline';
+  size?: 'sm' | 'md' | 'lg';
+  showLabel?: boolean;
   className?: string;
 }
 
@@ -16,7 +18,7 @@ const statusConfig = {
     text: 'Idle',
     emoji: '🟡',
   },
-  on_demand: {
+  'on-demand': {
     color: 'bg-status-on-demand',
     text: 'On-Demand',
     emoji: '⚪',
@@ -28,19 +30,26 @@ const statusConfig = {
   },
 };
 
-export function StatusBadge({ status, className }: StatusBadgeProps) {
+const sizeClasses = {
+  sm: 'text-xs',
+  md: 'text-sm',
+  lg: 'text-base',
+};
+
+export function StatusBadge({ status, size = 'md', showLabel = true, className }: StatusBadgeProps) {
   const config = statusConfig[status];
 
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium',
+        'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 font-medium',
         config.color,
+        sizeClasses[size],
         className
       )}
     >
       <span>{config.emoji}</span>
-      <span>{config.text}</span>
+      {showLabel && <span>{config.text}</span>}
     </span>
   );
 }
