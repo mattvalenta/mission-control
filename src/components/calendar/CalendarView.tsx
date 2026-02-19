@@ -1,7 +1,8 @@
 'use client';
 
-import { ChevronLeft, ChevronRight, Plus } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { ChevronLeft, ChevronRight, Plus, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { useSSEEvents } from '@/lib/hooks/useSSE';
 
 type ViewMode = 'day' | 'week' | 'month';
 
@@ -142,6 +143,12 @@ export default function CalendarView() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={fetchEvents}
+            className="p-2 text-slate-400 hover:text-white transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
           <button
             onClick={syncCron}
             className="px-3 py-1.5 bg-slate-700 text-slate-300 rounded hover:text-white text-sm"

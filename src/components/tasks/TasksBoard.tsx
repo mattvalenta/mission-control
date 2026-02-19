@@ -1,10 +1,10 @@
 'use client';
 
-import { Plus, Filter, LayoutGrid, List } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Plus, Filter, LayoutGrid, List, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { TierBadge } from '@/components/shared/TierBadge';
-import { StatusBadge } from '@/components/shared/StatusBadge';
+import { useSSEEvents } from '@/lib/hooks/useSSE';
 
 interface Task {
   id: string;
@@ -53,6 +53,26 @@ export default function TasksBoard() {
   const [managerFilter, setManagerFilter] = useState('all');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showFilters, setShowFilters] = useState(false);
+
+  const fetchTasks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tasks/tiers');
+      const data = await res.json();
+      if (data.success) {
+        setTasks(data.tasks);
+      }
+    } catch (error) {
+      console.error('Failed to fetch tasks:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
+  // Real-time updates via SSE
+  useSSEEvents('task_updated', fetchTasks);
+  useSSEEvents('task_created', fetchTasks);
 
   const filteredTasks = tasks.filter((task) => {
     if (tierFilter !== 'all' && task.tier !== tierFilter) return false;

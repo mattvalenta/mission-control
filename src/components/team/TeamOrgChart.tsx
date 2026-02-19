@@ -1,8 +1,9 @@
 'use client';
 
-import { Mail, Play, Eye, ExternalLink, MessageCircle } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Mail, Play, Eye, ExternalLink, MessageCircle, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 import { StatusBadge } from '@/components/shared/StatusBadge';
+import { useSSEEvents } from '@/lib/hooks/useSSE';
 
 interface TeamMember {
   id: string;
@@ -28,11 +29,7 @@ export default function TeamOrgChart() {
   const [loading, setLoading] = useState(true);
   const [selectedMember, setSelectedMember] = useState<TeamMember | null>(null);
 
-  useEffect(() => {
-    fetchTeam();
-  }, []);
-
-  const fetchTeam = async () => {
+  const fetchTeam = useCallback(async () => {
     try {
       const res = await fetch('/api/team');
       const data = await res.json();
@@ -44,7 +41,14 @@ export default function TeamOrgChart() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchTeam();
+  }, [fetchTeam]);
+
+  // Real-time updates via SSE
+  useSSEEvents('team_updated', fetchTeam);
 
   const updateStatus = async (id: string, status: TeamMember['status']) => {
     try {

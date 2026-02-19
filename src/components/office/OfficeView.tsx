@@ -1,8 +1,9 @@
 'use client';
 
-import { Moon, Sun, Coffee, Zap } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Moon, Sun, Coffee, Zap, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 import { StatusBadge } from '@/components/shared/StatusBadge';
+import { useSSEEvents } from '@/lib/hooks/useSSE';
 
 interface Agent {
   id: string;
@@ -67,8 +68,31 @@ export default function OfficeView() {
       );
     }, 5000);
 
-    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const fetchAgentStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/team');
+      const data = await res.json();
+      if (data.success) {
+        setAgents((prev) =>
+          prev.map((agent) => {
+            const member = data.members.find((m: { id: string }) => m.id === agent.id);
+            if (member) {
+              return { ...agent, status: member.status };
+            }
+            return agent;
+          })
+        );
+      }
+    } catch (error) {
+      console.error('Failed to fetch agent status:', error);
+    }
+  }, []);
+
+  // Real-time status updates via SSE
+  useSSEEvents('team_updated', fetchAgentStatus);
 
   const activeCount = agents.filter((a) => a.status === 'active').length;
   const onDemandCount = agents.filter((a) => a.status === 'on-demand').length;
@@ -79,6 +103,12 @@ export default function OfficeView() {
       <div className="flex items-center justify-between p-4 border-b border-slate-700">
         <div className="flex items-center gap-3">
           <h2 className="text-2xl font-bold text-white">Office View</h2>
+          <button
+            onClick={fetchAgentStatus}
+            className="p-2 text-slate-400 hover:text-white transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
           <span className="text-sm text-slate-400">
             {isNightMode ? '🌙 Night Mode' : '☀️ Day Mode'}
           </span>

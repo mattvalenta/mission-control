@@ -1,8 +1,9 @@
 'use client';
 
-import { Plus, Filter, Sparkles, Search, Edit2, Trash2 } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Plus, Filter, Sparkles, Search, Edit2, Trash2, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
+import { useSSEEvents } from '@/lib/hooks/useSSE';
 
 interface ContentItem {
   id: string;
@@ -49,11 +50,7 @@ export default function PipelineBoard() {
     platform: 'linkedin' as ContentItem['platform'],
   });
 
-  useEffect(() => {
-    fetchPipeline();
-  }, []);
-
-  const fetchPipeline = async () => {
+  const fetchPipeline = useCallback(async () => {
     try {
       const res = await fetch('/api/pipeline');
       const data = await res.json();
@@ -65,7 +62,15 @@ export default function PipelineBoard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchPipeline();
+  }, [fetchPipeline]);
+
+  // Real-time updates via SSE
+  useSSEEvents('pipeline_updated', fetchPipeline);
+  useSSEEvents('pipeline_deleted', fetchPipeline);
 
   const handleDragEnd = async (result: DropResult) => {
     if (!result.destination) return;
@@ -132,6 +137,12 @@ export default function PipelineBoard() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6 px-2">
         <h2 className="text-2xl font-bold text-white">Content Pipeline</h2>
+        <button
+          onClick={fetchPipeline}
+          className="p-2 text-slate-400 hover:text-white transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+        </button>
         <button
           onClick={() => setShowNewModal(true)}
           className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors"

@@ -1,7 +1,7 @@
 'use client';
 
-import { Search, Folder, File, Edit2, Save, X } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { Search, Folder, File, Edit2, Save, X, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
 
 interface MemoryFile {
   agent: string;
@@ -44,11 +44,7 @@ export default function MemoryBrowser() {
   const [editContent, setEditContent] = useState('');
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchFiles();
-  }, []);
-
-  const fetchFiles = async () => {
+  const fetchFiles = useCallback(async () => {
     try {
       const res = await fetch('/api/memory');
       const data = await res.json();
@@ -60,7 +56,11 @@ export default function MemoryBrowser() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchFiles();
+  }, [fetchFiles]);
 
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
@@ -137,6 +137,12 @@ export default function MemoryBrowser() {
         {/* Search */}
         <div className="p-3 border-b border-slate-700">
           <div className="flex gap-2">
+            <button
+              onClick={fetchFiles}
+              className="p-2 bg-slate-700 rounded hover:bg-slate-600"
+            >
+              <RefreshCw className="w-4 h-4 text-slate-400" />
+            </button>
             <div className="flex-1 flex items-center gap-2 bg-slate-700 rounded px-3 py-2">
               <Search className="w-4 h-4 text-slate-400" />
               <input
