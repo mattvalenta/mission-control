@@ -293,11 +293,14 @@ export type SSEEventType =
   | 'activity_logged'
   | 'deliverable_added'
   | 'agent_spawned'
-  | 'agent_completed';
+  | 'agent_completed'
+  | 'pipeline_updated'
+  | 'pipeline_deleted'
+  | 'calendar_updated';
 
 export interface SSEEvent {
   type: SSEEventType;
-  payload: Task | TaskActivity | TaskDeliverable | {
+  payload: Task | TaskActivity | TaskDeliverable | ContentItem | {
     taskId: string;
     sessionId: string;
     agentName?: string;
@@ -306,4 +309,21 @@ export interface SSEEvent {
   } | {
     id: string;  // For task_deleted events
   };
+}
+
+// Content item for pipeline
+export interface ContentItem {
+  id: string;
+  title: string;
+  type: string;
+  platform: string;
+  stage: string;
+  content?: string;
+  research?: string;
+  schedule?: string;
+  analysis?: string;
+  assigned_to?: string;
+  created_at: string;
+  updated_at: string;
+  published_at?: string;
 }
