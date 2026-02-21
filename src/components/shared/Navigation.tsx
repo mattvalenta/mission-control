@@ -9,12 +9,14 @@ import {
   Calendar, 
   FolderOpen, 
   Users, 
-  Building2 
+  Building2,
+  Share2
 } from 'lucide-react';
 
 const navItems = [
   { href: '/tasks', label: 'Tasks', icon: LayoutDashboard },
   { href: '/pipeline', label: 'Pipeline', icon: FileText },
+  { href: '/social', label: 'Social', icon: Share2 },
   { href: '/calendar', label: 'Calendar', icon: Calendar },
   { href: '/memory', label: 'Memory', icon: FolderOpen },
   { href: '/team', label: 'Team', icon: Users },
