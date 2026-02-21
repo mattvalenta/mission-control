@@ -95,7 +95,11 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
 
     const workspaceId = validatedData.workspace_id || 'default';
-    const status = validatedData.status || 'inbox';
+    // Default status to 'planning' - all tasks start in planning mode for Skippy to assign
+    const status = validatedData.status || 'planning';
+    // Default assignee to Skippy - Skippy assigns to managers after planning
+    const skippyAgentId = '3a90091a-a6e5-4abc-934e-117210d07d73';
+    const assignedAgentId = validatedData.assigned_agent_id || skippyAgentId;
     
     run(
       `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at)
@@ -106,7 +110,7 @@ export async function POST(request: NextRequest) {
         validatedData.description || null,
         status,
         validatedData.priority || 'normal',
-        validatedData.assigned_agent_id || null,
+        assignedAgentId,
         validatedData.created_by_agent_id || null,
         workspaceId,
         validatedData.business_id || 'default',

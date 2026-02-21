@@ -1,46 +1,22 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { CheckCircle, Circle, Lock, AlertCircle, Loader2, X } from 'lucide-react';
+import { CheckCircle, Circle, ArrowRight, User, Bot, Loader2, X, AlertCircle } from 'lucide-react';
 
 interface PlanningOption {
   id: string;
   label: string;
 }
 
-interface PlanningQuestion {
+interface BatchQuestion {
+  id: string;
   question: string;
   options: PlanningOption[];
 }
 
-interface PlanningMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: number;
-}
-
-interface PlanningState {
-  taskId: string;
-  sessionKey?: string;
-  messages: PlanningMessage[];
-  currentQuestion?: PlanningQuestion;
-  isComplete: boolean;
-  dispatchError?: string;
-  spec?: {
-    title: string;
-    summary: string;
-    deliverables: string[];
-    success_criteria: string[];
-    constraints: Record<string, unknown>;
-  };
-  agents?: Array<{
-    name: string;
-    role: string;
-    avatar_emoji: string;
-    soul_md: string;
-    instructions: string;
-  }>;
-  isStarted: boolean;
+interface BatchAnswer {
+  questionId: string;
+  answer: string;
 }
 
 interface PlanningTabProps {
@@ -49,624 +25,517 @@ interface PlanningTabProps {
 }
 
 export function PlanningTab({ taskId, onSpecLocked }: PlanningTabProps) {
-  const [state, setState] = useState<PlanningState | null>(null);
+  // Batch mode state
+  const [questions, setQuestions] = useState<BatchQuestion[]>([]);
+  const [answers, setAnswers] = useState<Map<string, string>>(new Map());
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [canceling, setCanceling] = useState(false);
+  const [isComplete, setIsComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [otherText, setOtherText] = useState('');
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
-  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
-  const [retryingDispatch, setRetryingDispatch] = useState(false);
-  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
+  const [otherText, setOtherText] = useState('');
+  const [planningStage, setPlanningStage] = useState<string>('user_planning');
 
-  // Refs to track polling state without triggering re-renders
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const pollingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const isPollingRef = useRef(false);
-  const lastSubmissionRef = useRef<{ answer: string; otherText?: string } | null>(null);
-  const currentQuestionRef = useRef<string | undefined>(undefined);
-  
+  // SSE ref for cleanup
+  const eventSourceRef = useRef<EventSource | null>(null);
 
-
-  // Load planning state (initial load only)
-  const loadState = useCallback(async () => {
+  // Load batch state
+  const loadBatchState = useCallback(async () => {
     try {
-      const res = await fetch(`/api/tasks/${taskId}/planning`);
+      const res = await fetch(`/api/tasks/${taskId}/planning/questions/batch`);
       if (res.ok) {
         const data = await res.json();
-        setState(data);
-        currentQuestionRef.current = data.currentQuestion?.question;
-        // Don't call onSpecLocked on initial load - only when planning completes actively
+        
+        if (data.questions) {
+          setQuestions(data.questions);
+          // Restore answers
+          const answerMap = new Map<string, string>();
+          for (const a of data.answers || []) {
+            answerMap.set(a.questionId, a.answer);
+          }
+          setAnswers(answerMap);
+          setIsComplete(data.isComplete);
+          setPlanningStage(data.planningStage || 'user_planning');
+          // Set current index to first unanswered question
+          const firstUnanswered = data.questions.findIndex(
+            (q: BatchQuestion) => !answerMap.has(q.id)
+          );
+          setCurrentIndex(firstUnanswered >= 0 ? firstUnanswered : data.questions.length - 1);
+        }
       }
     } catch (err) {
-      console.error('Failed to load planning state:', err);
-      setError('Failed to load planning state');
+      console.error('Failed to load batch state:', err);
     } finally {
       setLoading(false);
     }
   }, [taskId]);
 
-  // Stop polling (defined first to avoid circular dependency)
-  const stopPolling = useCallback(() => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
-    }
-    if (pollingTimeoutRef.current) {
-      clearTimeout(pollingTimeoutRef.current);
-      pollingTimeoutRef.current = null;
-    }
-    setIsWaitingForResponse(false);
-  }, []);
-
-  // Poll for updates using the poll endpoint (lightweight OpenClaw check)
-  const pollForUpdates = useCallback(async () => {
-    if (isPollingRef.current) return; // Prevent overlapping polls
-    isPollingRef.current = true;
-
-    try {
-      const res = await fetch(`/api/tasks/${taskId}/planning/poll`);
-      if (res.ok) {
-        const data = await res.json();
-
-        if (data.hasUpdates) {
-          setState(prev => ({
-            ...prev!,
-            messages: data.messages,
-            isComplete: data.complete,
-            spec: data.spec,
-            agents: data.agents,
-            currentQuestion: data.currentQuestion,
-            dispatchError: data.dispatchError,
-          }));
-
-          // Only clear selection and other text when the question actually changes
-          // This prevents clearing selection when getting updates for the same question
-          const questionChanged = currentQuestionRef.current !== data.currentQuestion?.question;
-          
-          // Update ref when question changes
-          if (data.currentQuestion) {
-            currentQuestionRef.current = data.currentQuestion.question;
-          }
-
-          if (questionChanged) {
-            setSelectedOption(null);
-            setOtherText('');
-            setIsSubmittingAnswer(false); // Clear submitting state when new question arrives
-          }
-
-          // Show dispatch error if present
-          if (data.dispatchError) {
-            setError(`Planning completed but dispatch failed: ${data.dispatchError}`);
-          }
-
-          if (data.complete && onSpecLocked) {
-            onSpecLocked();
-          }
-
-          setIsWaitingForResponse(false);
-          stopPolling(); // Stop polling when we get a response
-        }
-      }
-    } catch (err) {
-      console.error('Failed to poll for updates:', err);
-    } finally {
-      isPollingRef.current = false;
-    }
-  }, [taskId, onSpecLocked, stopPolling, setState, setError, setIsSubmittingAnswer, setSelectedOption, setOtherText]);
-
-  // Start polling when waiting for response
-  const startPolling = useCallback(() => {
-    stopPolling();
-    setIsWaitingForResponse(true);
-
-    // Poll every 2 seconds - need faster feedback for planning UX
-    // Planning is typically short-lived, so this is acceptable
-    pollingIntervalRef.current = setInterval(() => {
-      pollForUpdates();
-    }, 2000);
-
-    // Set a 30-second timeout - if no response, show error
-    // Don't clear selection - user can retry with same selection
-    pollingTimeoutRef.current = setTimeout(() => {
-      stopPolling();
-      setError('The orchestrator is taking too long to respond. Please try submitting again or refresh the page.');
-    }, 30000);
-  }, [pollForUpdates, stopPolling]);
-
-  // Update currentQuestion ref when state changes
-  useEffect(() => {
-    if (state?.currentQuestion) {
-      currentQuestionRef.current = state.currentQuestion.question;
-    }
-  }, [state]);
-
-  // Initial load
-  useEffect(() => {
-    loadState();
-    return () => stopPolling();
-  }, [loadState, stopPolling]);
-
-  // Start planning session
-  const startPlanning = async () => {
+  // Start batch planning
+  const startBatchPlanning = async () => {
     setStarting(true);
     setError(null);
 
     try {
-      const res = await fetch(`/api/tasks/${taskId}/planning`, { method: 'POST' });
+      const res = await fetch(`/api/tasks/${taskId}/planning/questions/batch`, {
+        method: 'POST',
+      });
+
       const data = await res.json();
 
       if (res.ok) {
-        setState(prev => ({
-          ...prev!,
-          sessionKey: data.sessionKey,
-          messages: data.messages || [],
-          isStarted: true,
-        }));
-
-        // Start polling for the first question
-        startPolling();
+        if (data.status === 'generating') {
+          // Questions being generated, start polling
+          setLoading(true);
+          setStarting(false);
+        } else {
+          setQuestions(data.questions || []);
+          setCurrentIndex(0);
+          setAnswers(new Map());
+          setStarting(false);
+        }
       } else {
         setError(data.error || 'Failed to start planning');
+        setStarting(false);
       }
     } catch (err) {
       setError('Failed to start planning');
-    } finally {
       setStarting(false);
     }
   };
 
-  // Submit answer
-  const submitAnswer = async () => {
-    if (!selectedOption) return;
+  // Poll for questions when generating
+  useEffect(() => {
+    if (!loading && !starting) return;
+    if (questions.length > 0) return;
 
-    setSubmitting(true);
-    setIsSubmittingAnswer(true); // Show submitting state in UI
-    setError(null);
+    const pollInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}/planning/questions/batch`);
+        const data = await res.json();
 
-    // Store submission for retry
-    const submission = {
-      answer: selectedOption === 'other' ? 'Other' : selectedOption,
-      otherText: selectedOption === 'other' ? otherText : undefined,
-    };
-    lastSubmissionRef.current = submission;
-
-    try {
-      const res = await fetch(`/api/tasks/${taskId}/planning/answer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(submission),
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        // Start polling for the next question or completion
-        // Don't clear selection yet - keep it visible while waiting for response
-        startPolling();
-      } else {
-        setError(data.error || 'Failed to submit answer');
-        setIsSubmittingAnswer(false); // Clear submitting state on error
-        // Clear selection on error so user can try again
-        setSelectedOption(null);
-        setOtherText('');
+        if (data.questions && data.questions.length > 0) {
+          setQuestions(data.questions);
+          setCurrentIndex(0);
+          setAnswers(new Map());
+          setLoading(false);
+          clearInterval(pollInterval);
+        } else if (data.isComplete) {
+          setIsComplete(true);
+          setLoading(false);
+          clearInterval(pollInterval);
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
       }
-    } catch (err) {
-      setError('Failed to submit answer');
-      setIsSubmittingAnswer(false); // Clear submitting state on error
-      // Clear selection on error so user can try again
-      setSelectedOption(null);
-      setOtherText('');
-    } finally {
-      setSubmitting(false);
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(pollInterval);
+  }, [loading, starting, questions.length, taskId]);
+
+  // Handle answer selection - moves to next question instantly
+  const handleAnswer = (optionLabel: string, isOther: boolean) => {
+    if (!questions[currentIndex]) return;
+
+    const questionId = questions[currentIndex].id;
+    const answer = isOther ? otherText : optionLabel;
+
+    // Store answer locally
+    setAnswers(prev => {
+      const newMap = new Map(prev);
+      newMap.set(questionId, answer);
+      return newMap;
+    });
+
+    // Clear selection for next question
+    setSelectedOption(null);
+    setOtherText('');
+
+    // Move to next question instantly
+    if (currentIndex < questions.length - 1) {
+      setCurrentIndex(prev => prev + 1);
     }
   };
 
-  // Retry last submission
-  const handleRetry = async () => {
-    const submission = lastSubmissionRef.current;
-    if (!submission) return;
-
+  // Submit all answers at once
+  const submitAllAnswers = async () => {
     setSubmitting(true);
-    setIsSubmittingAnswer(true); // Show submitting state
     setError(null);
 
     try {
-      const res = await fetch(`/api/tasks/${taskId}/planning/answer`, {
-        method: 'POST',
+      const answersArray = Array.from(answers.entries()).map(([questionId, answer]) => ({
+        questionId,
+        answer,
+      }));
+
+      const res = await fetch(`/api/tasks/${taskId}/planning/questions/batch`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(submission),
+        body: JSON.stringify({ answers: answersArray }),
       });
 
       const data = await res.json();
 
       if (res.ok) {
-        startPolling();
+        setIsComplete(true);
+        if (onSpecLocked) {
+          onSpecLocked();
+        }
       } else {
-        setError(data.error || 'Failed to submit answer');
-        // Clear submission state and selection on error so user can retry
-        setIsSubmittingAnswer(false);
-        setSelectedOption(null);
-        setOtherText('');
+        setError(data.error || 'Failed to submit answers');
       }
     } catch (err) {
-      setError('Failed to submit answer');
-      // Clear submission state and selection on error so user can retry
-      setIsSubmittingAnswer(false);
-      setSelectedOption(null);
-      setOtherText('');
+      setError('Failed to submit answers');
     } finally {
       setSubmitting(false);
-    }
-  };
-
-  // Retry dispatch for failed planning completions
-  const retryDispatch = async () => {
-    setRetryingDispatch(true);
-    setError(null);
-
-    try {
-      const res = await fetch(`/api/tasks/${taskId}/planning/retry-dispatch`, {
-        method: 'POST',
-      });
-
-      const data = await res.json();
-
-      if (res.ok) {
-        console.log('Dispatch retry successful:', data.message);
-        setError(null);
-      } else {
-        setError(`Failed to retry dispatch: ${data.error}`);
-      }
-    } catch (err) {
-      setError('Failed to retry dispatch');
-    } finally {
-      setRetryingDispatch(false);
     }
   };
 
   // Cancel planning
   const cancelPlanning = async () => {
-    if (!confirm('Are you sure you want to cancel planning? This will reset the planning state.')) {
-      return;
-    }
-
-    setCanceling(true);
-    setError(null);
-    setIsSubmittingAnswer(false); // Clear submitting state when canceling
-    stopPolling(); // Stop polling when canceling
+    if (!confirm('Are you sure you want to cancel planning?')) return;
 
     try {
-      const res = await fetch(`/api/tasks/${taskId}/planning`, {
-        method: 'DELETE',
-      });
-
-      if (res.ok) {
-        // Reset state
-        setState({
-          taskId,
-          isStarted: false,
-          messages: [],
-          isComplete: false,
-        });
-      } else {
-        const data = await res.json();
-        setError(data.error || 'Failed to cancel planning');
-      }
+      await fetch(`/api/tasks/${taskId}/planning`, { method: 'DELETE' });
+      setQuestions([]);
+      setAnswers(new Map());
+      setCurrentIndex(0);
+      setIsComplete(false);
     } catch (err) {
       setError('Failed to cancel planning');
-    } finally {
-      setCanceling(false);
     }
   };
+
+  // Initial load
+  useEffect(() => {
+    loadBatchState();
+  }, [loadBatchState]);
+
+  // SSE for real-time updates (optimization complete, etc.)
+  useEffect(() => {
+    eventSourceRef.current = new EventSource('/api/events/stream');
+    
+    eventSourceRef.current.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'task_updated' && data.payload?.id === taskId) {
+          loadBatchState();
+        }
+      } catch {
+        // Ignore non-JSON messages
+      }
+    };
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, [taskId, loadBatchState]);
+
+  // Stage indicator
+  const StageIndicator = () => (
+    <div className="flex items-center gap-2 mb-4 p-3 bg-mc-bg-secondary rounded-lg">
+      <div className={`flex items-center gap-2 ${planningStage === 'user_planning' ? 'text-mc-accent' : 'text-mc-text-secondary'}`}>
+        <User className="w-4 h-4" />
+        <span className="text-sm font-medium">User Planning</span>
+        {planningStage === 'user_planning' && <Circle className="w-2 h-2 fill-mc-accent" />}
+      </div>
+      <ArrowRight className="w-4 h-4 text-mc-text-secondary" />
+      <div className={`flex items-center gap-2 ${planningStage === 'agent_planning' ? 'text-mc-accent' : 'text-mc-text-secondary'}`}>
+        <Bot className="w-4 h-4" />
+        <span className="text-sm font-medium">Agent Planning</span>
+        {planningStage === 'agent_planning' && <Circle className="w-2 h-2 fill-mc-accent" />}
+      </div>
+      <ArrowRight className="w-4 h-4 text-mc-text-secondary" />
+      <div className={`flex items-center gap-2 ${planningStage === 'complete' ? 'text-green-400' : 'text-mc-text-secondary'}`}>
+        <CheckCircle className="w-4 h-4" />
+        <span className="text-sm font-medium">Ready</span>
+      </div>
+    </div>
+  );
 
   if (loading) {
     return (
       <div className="flex items-center justify-center p-8">
         <Loader2 className="w-6 h-6 animate-spin text-mc-accent" />
-        <span className="ml-2 text-mc-text-secondary">Loading planning state...</span>
+        <span className="ml-2 text-mc-text-secondary">Loading...</span>
       </div>
     );
   }
 
-  // Planning complete - show spec and agents
-  if (state?.isComplete && state?.spec) {
+  // Planning complete - show transition UI
+  if (isComplete && planningStage === 'user_planning') {
     return (
       <div className="p-4 space-y-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-green-400">
-            <Lock className="w-5 h-5" />
-            <span className="font-medium">Planning Complete</span>
+        <StageIndicator />
+        
+        <div className="bg-mc-bg-secondary border border-mc-accent/30 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <CheckCircle className="w-5 h-5 text-mc-accent" />
+            <span className="font-medium">Questions Complete</span>
           </div>
-          {state.dispatchError && (
-            <div className="text-right">
-              <span className="text-sm text-amber-400">⚠️ Dispatch Failed</span>
-            </div>
-          )}
+          <p className="text-sm text-mc-text-secondary mb-4">
+            Skippy is now optimizing your task and will assign it to the right manager.
+          </p>
+          <div className="flex items-center gap-2 text-sm text-mc-text-secondary">
+            <Loader2 className="w-4 h-4 animate-spin text-mc-accent" />
+            <span>Processing answers...</span>
+          </div>
         </div>
-        
-        {/* Dispatch Error with Retry */}
-        {state.dispatchError && (
-          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
-            <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
-              <div className="flex-1">
-                <p className="text-amber-400 text-sm font-medium mb-2">Task dispatch failed</p>
-                <p className="text-amber-300 text-xs mb-3">{state.dispatchError}</p>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={retryDispatch}
-                    disabled={retryingDispatch}
-                    className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-xs rounded disabled:opacity-50 flex items-center gap-1"
-                  >
-                    {retryingDispatch ? (
-                      <>
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Retrying...
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle className="w-3 h-3" />
-                        Retry Dispatch
-                      </>
-                    )}
-                  </button>
-                  <span className="text-amber-400 text-xs">
-                    This will attempt to assign the task to an agent
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-        
-        {/* Spec Summary */}
-        <div className="bg-mc-bg border border-mc-border rounded-lg p-4">
-          <h3 className="font-medium mb-2">{state.spec.title}</h3>
-          <p className="text-sm text-mc-text-secondary mb-4">{state.spec.summary}</p>
-          
-          {state.spec.deliverables?.length > 0 && (
-            <div className="mb-3">
-              <h4 className="text-sm font-medium mb-1">Deliverables:</h4>
-              <ul className="list-disc list-inside text-sm text-mc-text-secondary">
-                {state.spec.deliverables.map((d, i) => (
-                  <li key={i}>{d}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          
-          {state.spec.success_criteria?.length > 0 && (
-            <div>
-              <h4 className="text-sm font-medium mb-1">Success Criteria:</h4>
-              <ul className="list-disc list-inside text-sm text-mc-text-secondary">
-                {state.spec.success_criteria.map((c, i) => (
-                  <li key={i}>{c}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-        
-        {/* Generated Agents */}
-        {state.agents && state.agents.length > 0 && (
-          <div>
-            <h3 className="font-medium mb-2">Agents Created:</h3>
-            <div className="space-y-2">
-              {state.agents.map((agent, i) => (
-                <div key={i} className="bg-mc-bg border border-mc-border rounded-lg p-3 flex items-center gap-3">
-                  <span className="text-2xl">{agent.avatar_emoji}</span>
-                  <div>
-                    <p className="font-medium">{agent.name}</p>
-                    <p className="text-sm text-mc-text-secondary">{agent.role}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     );
   }
 
-  // Not started - show start button
-  if (!state?.isStarted) {
+  // Agent planning - waiting for agent to generate questions or Skippy to answer
+  if (planningStage === 'agent_planning') {
     return (
-      <div className="flex flex-col items-center justify-center p-8 space-y-4">
-        <div className="text-center">
-          <h3 className="text-lg font-medium mb-2">Start Planning</h3>
-          <p className="text-mc-text-secondary text-sm max-w-md">
-            I&apos;ll ask you a few questions to understand exactly what you need. 
-            All questions are multiple choice — just click to answer.
-          </p>
-        </div>
+      <div className="p-4 space-y-6">
+        <StageIndicator />
         
-        {error && (
-          <div className="flex items-center gap-2 text-red-400 text-sm">
-            <AlertCircle className="w-4 h-4" />
-            {error}
+        <div className="bg-mc-bg-secondary border border-blue-500/30 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Bot className="w-5 h-5 text-blue-400" />
+            <span className="font-medium">Agent Planning Phase</span>
           </div>
-        )}
-        
-        <button
-          onClick={startPlanning}
-          disabled={starting}
-          className="px-6 py-3 bg-mc-accent text-mc-bg rounded-lg font-medium hover:bg-mc-accent/90 disabled:opacity-50 flex items-center gap-2"
-        >
-          {starting ? (
+          
+          {questions.length === 0 ? (
             <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              Starting...
+              <p className="text-sm text-mc-text-secondary mb-4">
+                The assigned agent is generating follow-up questions. Skippy will answer them automatically.
+              </p>
+              <div className="flex items-center gap-2 text-sm text-mc-text-secondary">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                <span>Waiting for agent questions...</span>
+              </div>
             </>
           ) : (
-            <>📋 Start Planning</>
+            <>
+              <p className="text-sm text-mc-text-secondary mb-4">
+                Agent has generated {questions.length} questions. Skippy is answering them...
+              </p>
+              <div className="flex items-center gap-2 text-sm text-mc-text-secondary">
+                <Loader2 className="w-4 h-4 animate-spin text-mc-accent" />
+                <span>Skippy answering questions...</span>
+              </div>
+            </>
           )}
-        </button>
+        </div>
       </div>
     );
   }
 
-  // Show current question
+  // Not started - show start button or generating message
+  if (questions.length === 0) {
+    return (
+      <div className="p-4">
+        <StageIndicator />
+        <div className="flex flex-col items-center justify-center p-8 space-y-4">
+          <div className="text-center">
+            <h3 className="text-lg font-medium mb-2">User Planning</h3>
+            <p className="text-mc-text-secondary text-sm max-w-md">
+              Answer a few quick questions to help me understand exactly what you need.
+              Questions are simple and you can fly through them.
+            </p>
+          </div>
+          
+          {error && (
+            <div className="flex items-center gap-2 text-red-400 text-sm">
+              <AlertCircle className="w-4 h-4" />
+              {error}
+            </div>
+          )}
+          
+          {starting || loading ? (
+            <div className="flex items-center gap-2 text-mc-accent">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span>Generating questions for your task...</span>
+            </div>
+          ) : (
+            <button
+              onClick={startBatchPlanning}
+              disabled={starting}
+              className="px-6 py-3 bg-mc-accent text-mc-bg rounded-lg font-medium hover:bg-mc-accent/90 disabled:opacity-50 flex items-center gap-2"
+            >
+              <>📋 Start Planning</>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Current question
+  const currentQuestion = questions[currentIndex];
+  const answeredCount = answers.size;
+  const totalQuestions = questions.length;
+  const allAnswered = answeredCount === totalQuestions;
+
   return (
     <div className="flex flex-col h-full">
-      {/* Progress indicator with cancel button */}
-      <div className="p-4 border-b border-mc-border flex items-center justify-between">
-        <div className="flex items-center gap-2 text-sm text-mc-text-secondary">
-          <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
-          <span>Planning in progress...</span>
+      {/* Stage indicator */}
+      <div className="p-4 border-b border-mc-border">
+        <StageIndicator />
+      </div>
+
+      {/* Progress bar */}
+      <div className="p-4 border-b border-mc-border">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm text-mc-text-secondary">
+            Question {currentIndex + 1} of {totalQuestions}
+          </span>
+          <button
+            onClick={cancelPlanning}
+            className="text-xs text-mc-accent-red hover:underline"
+          >
+            Cancel
+          </button>
         </div>
-        <button
-          onClick={cancelPlanning}
-          disabled={canceling}
-          className="flex items-center gap-2 px-3 py-2 text-sm text-mc-accent-red hover:bg-mc-accent-red/10 rounded disabled:opacity-50"
-        >
-          {canceling ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Canceling...
-            </>
-          ) : (
-            <>
-              <X className="w-4 h-4" />
-              Cancel
-            </>
-          )}
-        </button>
+        <div className="w-full bg-mc-bg-tertiary rounded-full h-2">
+          <div
+            className="bg-mc-accent h-2 rounded-full transition-all duration-300"
+            style={{ width: `${(answeredCount / totalQuestions) * 100}%` }}
+          />
+        </div>
       </div>
 
       {/* Question area */}
       <div className="flex-1 overflow-y-auto p-6">
-        {state?.currentQuestion ? (
-          <div className="max-w-xl mx-auto">
-            <h3 className="text-lg font-medium mb-6">
-              {state.currentQuestion.question}
-            </h3>
+        <div className="max-w-xl mx-auto">
+          <h3 className="text-lg font-medium mb-6">
+            {currentQuestion.question}
+          </h3>
 
-            <div className="space-y-3">
-              {state.currentQuestion.options.map((option) => {
-                const isSelected = selectedOption === option.label;
-                const isOther = option.id === 'other' || option.label.toLowerCase() === 'other';
-                const isThisOptionSubmitting = isSubmittingAnswer && isSelected;
+          <div className="space-y-3">
+            {currentQuestion.options.map((option) => {
+              const isSelected = selectedOption === option.label;
+              const isOther = option.id === 'other' || option.label.toLowerCase() === 'other';
 
-                return (
-                  <div key={option.id}>
-                    <button
-                      onClick={() => setSelectedOption(option.label)}
-                      disabled={submitting}
-                      className={`w-full flex items-center gap-3 p-4 rounded-lg border transition-all text-left ${
-                        isThisOptionSubmitting
-                          ? 'border-mc-accent bg-mc-accent/20'
-                          : isSelected
-                          ? 'border-mc-accent bg-mc-accent/10'
-                          : 'border-mc-border hover:border-mc-accent/50'
-                      } disabled:opacity-50`}
-                    >
-                      <span className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${
-                        isSelected ? 'bg-mc-accent text-mc-bg' : 'bg-mc-bg-tertiary'
-                      }`}>
-                        {option.id.toUpperCase()}
-                      </span>
-                      <span className="flex-1">{option.label}</span>
-                      {isThisOptionSubmitting ? (
-                        <Loader2 className="w-5 h-5 text-mc-accent animate-spin" />
-                      ) : isSelected && !submitting ? (
-                        <CheckCircle className="w-5 h-5 text-mc-accent" />
-                      ) : null}
-                    </button>
+              return (
+                <div key={option.id}>
+                  <button
+                    onClick={() => {
+                      setSelectedOption(option.label);
+                      if (!isOther) {
+                        // Instant transition for non-Other options
+                        handleAnswer(option.label, false);
+                      }
+                    }}
+                    className={`w-full flex items-center gap-3 p-4 rounded-lg border transition-all text-left ${
+                      isSelected
+                        ? 'border-mc-accent bg-mc-accent/10'
+                        : 'border-mc-border hover:border-mc-accent/50'
+                    }`}
+                  >
+                    <span className={`w-8 h-8 rounded flex items-center justify-center text-sm font-bold ${
+                      isSelected ? 'bg-mc-accent text-mc-bg' : 'bg-mc-bg-tertiary'
+                    }`}>
+                      {option.id.toUpperCase()}
+                    </span>
+                    <span className="flex-1">{option.label}</span>
+                    {isSelected && <CheckCircle className="w-5 h-5 text-mc-accent" />}
+                  </button>
 
-                    {/* Other text input */}
-                    {isOther && isSelected && (
-                      <div className="mt-2 ml-11">
-                        <input
-                          type="text"
-                          value={otherText}
-                          onChange={(e) => setOtherText(e.target.value)}
-                          placeholder="Please specify..."
-                          className="w-full bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
-                          disabled={submitting}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            {error && (
-              <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-red-400 text-sm">{error}</p>
-                    {!isWaitingForResponse && lastSubmissionRef.current && (
+                  {/* Other text input */}
+                  {isOther && isSelected && (
+                    <div className="mt-2 ml-11 flex gap-2">
+                      <input
+                        type="text"
+                        value={otherText}
+                        onChange={(e) => setOtherText(e.target.value)}
+                        placeholder="Please specify..."
+                        className="flex-1 bg-mc-bg border border-mc-border rounded px-3 py-2 text-sm focus:outline-none focus:border-mc-accent"
+                        autoFocus
+                      />
                       <button
-                        onClick={handleRetry}
-                        disabled={submitting}
-                        className="mt-2 text-xs text-red-400 hover:text-red-300 underline disabled:opacity-50"
+                        onClick={() => handleAnswer(otherText, true)}
+                        disabled={!otherText.trim()}
+                        className="px-4 py-2 bg-mc-accent text-mc-bg rounded text-sm font-medium hover:bg-mc-accent/90 disabled:opacity-50"
                       >
-                        {submitting ? 'Retrying...' : 'Retry'}
+                        OK
                       </button>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              );
+            })}
+          </div>
 
-            {/* Submit button */}
-            <div className="mt-6">
+          {/* Navigation buttons */}
+          <div className="mt-6 flex gap-3">
+            {currentIndex > 0 && (
               <button
-                onClick={submitAnswer}
-                disabled={!selectedOption || submitting || (selectedOption === 'Other' && !otherText.trim())}
-                className="w-full px-6 py-3 bg-mc-accent text-mc-bg rounded-lg font-medium hover:bg-mc-accent/90 disabled:opacity-50 flex items-center justify-center gap-2"
+                onClick={() => setCurrentIndex(prev => prev - 1)}
+                className="px-4 py-2 border border-mc-border rounded-lg text-sm hover:bg-mc-bg-tertiary"
+              >
+                ← Back
+              </button>
+            )}
+            
+            <div className="flex-1" />
+            
+            {allAnswered ? (
+              <button
+                onClick={submitAllAnswers}
+                disabled={submitting}
+                className="px-6 py-3 bg-mc-accent text-mc-bg rounded-lg font-medium hover:bg-mc-accent/90 disabled:opacity-50 flex items-center gap-2"
               >
                 {submitting ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    Sending...
+                    Submitting...
                   </>
                 ) : (
-                  'Continue →'
+                  <>
+                    <CheckCircle className="w-5 h-5" />
+                    Submit All Answers
+                  </>
                 )}
               </button>
+            ) : (
+              currentIndex < totalQuestions - 1 && !selectedOption && (
+                <button
+                  onClick={() => setCurrentIndex(prev => prev + 1)}
+                  className="px-4 py-2 border border-mc-border rounded-lg text-sm hover:bg-mc-bg-tertiary"
+                >
+                  Skip →
+                </button>
+              )
+            )}
+          </div>
 
-              {/* Waiting indicator after submit */}
-              {isSubmittingAnswer && !submitting && (
-                <div className="mt-4 flex items-center justify-center gap-2 text-sm text-mc-text-secondary">
-                  <Loader2 className="w-4 h-4 animate-spin text-mc-accent" />
-                  <span>Waiting for response...</span>
-                </div>
-              )}
+          {error && (
+            <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400" />
+                <p className="text-red-400 text-sm">{error}</p>
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <Loader2 className="w-8 h-8 animate-spin text-mc-accent mx-auto mb-2" />
-              <p className="text-mc-text-secondary">
-                {isWaitingForResponse ? 'Waiting for response...' : 'Waiting for next question...'}
-              </p>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* Conversation history (collapsed by default) */}
-      {state?.messages && state.messages.length > 0 && (
-        <details className="border-t border-mc-border">
-          <summary className="p-3 text-sm text-mc-text-secondary cursor-pointer hover:bg-mc-bg-tertiary">
-            View conversation ({state.messages.length} messages)
-          </summary>
-          <div className="p-3 space-y-2 max-h-48 overflow-y-auto bg-mc-bg">
-            {state.messages.map((msg, i) => (
-              <div key={i} className={`text-sm ${msg.role === 'user' ? 'text-mc-accent' : 'text-mc-text-secondary'}`}>
-                <span className="font-medium">{msg.role === 'user' ? 'You' : 'Orchestrator'}:</span>{' '}
-                <span className="opacity-75">{msg.content.substring(0, 100)}...</span>
-              </div>
-            ))}
-          </div>
-        </details>
+      {/* Summary of answered questions */}
+      {answeredCount > 0 && (
+        <div className="border-t border-mc-border p-3 bg-mc-bg-secondary">
+          <details>
+            <summary className="text-sm text-mc-text-secondary cursor-pointer">
+              View your answers ({answeredCount}/{totalQuestions})
+            </summary>
+            <div className="mt-2 space-y-1">
+              {questions.map((q, i) => {
+                const answer = answers.get(q.id);
+                return (
+                  <div key={q.id} className="text-xs flex gap-2">
+                    <span className="text-mc-text-secondary">Q{i + 1}:</span>
+                    <span className="text-mc-accent">{answer || 'Not answered'}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </details>
+        </div>
       )}
     </div>
   );

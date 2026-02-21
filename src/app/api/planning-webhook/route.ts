@@ -2,19 +2,28 @@ import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 
-// POST /api/tasks/[id]/planning/answer - Agent submits a question
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id: taskId } = await params;
+// Webhook token for authentication
+const WEBHOOK_TOKEN = 'mc-planning-webhook-secret';
 
+// POST /api/planning-webhook - Skippy injects questions directly
+// This bypasses shell quoting issues by accepting a clean JSON payload
+export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { question, options } = body;
+    // Verify auth
+    const authHeader = request.headers.get('authorization');
+    const token = authHeader?.replace('Bearer ', '');
+    
+    if (token !== WEBHOOK_TOKEN) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
-    if (!question || !options || !Array.isArray(options)) {
-      return NextResponse.json({ error: 'Question and options array required' }, { status: 400 });
+    const body = await request.json();
+    const { taskId, question, options } = body;
+
+    if (!taskId || !question || !options || !Array.isArray(options)) {
+      return NextResponse.json({ 
+        error: 'taskId, question, and options array are required' 
+      }, { status: 400 });
     }
 
     const task = queryOne<{
@@ -43,7 +52,7 @@ export async function POST(
       [JSON.stringify(messages), taskId]
     );
 
-    // Broadcast update
+    // Broadcast update via SSE
     const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (updatedTask) {
       broadcast({
@@ -54,11 +63,11 @@ export async function POST(
 
     return NextResponse.json({
       success: true,
-      message: 'Question added to planning session',
+      message: 'Question injected successfully',
       currentQuestion: { question, options },
     });
   } catch (error) {
-    console.error('Failed to add planning answer:', error);
-    return NextResponse.json({ error: 'Failed to add planning answer' }, { status: 500 });
+    console.error('Planning webhook error:', error);
+    return NextResponse.json({ error: 'Failed to inject question' }, { status: 500 });
   }
 }

@@ -23,7 +23,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
   const { agents, addTask, updateTask, addEvent } = useMissionControl();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAgentModal, setShowAgentModal] = useState(false);
-  const [usePlanningMode, setUsePlanningMode] = useState(false);
+  const [usePlanningMode, setUsePlanningMode] = useState(true); // Always start in planning mode
   // Auto-switch to planning tab if task is in planning status
   const [activeTab, setActiveTab] = useState<TabType>(task?.status === 'planning' ? 'planning' : 'overview');
 
@@ -32,17 +32,20 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
     window.location.reload();
   }, []);
 
+  // Skippy's agent ID - all tasks default to Skippy for planning/assignment
+  const skippyAgentId = '3a90091a-a6e5-4abc-934e-117210d07d73';
+
   const [form, setForm] = useState({
     title: task?.title || '',
     description: task?.description || '',
     priority: task?.priority || 'normal' as TaskPriority,
-    status: task?.status || 'inbox' as TaskStatus,
-    assigned_agent_id: task?.assigned_agent_id || '',
+    status: task?.status || 'planning' as TaskStatus, // Default to planning mode
+    assigned_agent_id: task?.assigned_agent_id || skippyAgentId, // Default to Skippy
     due_date: task?.due_date || '',
   });
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (e?: React.FormEvent | React.MouseEvent) => {
+    e?.preventDefault();
     setIsSubmitting(true);
 
     try {
@@ -192,7 +195,7 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
         <div className="flex-1 overflow-y-auto p-4">
           {/* Overview Tab */}
           {activeTab === 'overview' && (
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form id="task-form" onSubmit={handleSubmit} className="space-y-4">
           {/* Title */}
           <div>
             <label className="block text-sm font-medium mb-1">Title</label>
@@ -366,8 +369,9 @@ export function TaskModal({ task, onClose, workspaceId }: TaskModalProps) {
                 Cancel
               </button>
               <button
-                onClick={handleSubmit}
-                disabled={isSubmitting}
+                type="submit"
+                form="task-form"
+                disabled={isSubmitting || !form.title.trim()}
                 className="flex items-center gap-2 px-4 py-2 bg-mc-accent text-mc-bg rounded text-sm font-medium hover:bg-mc-accent/90 disabled:opacity-50"
               >
                 <Save className="w-4 h-4" />

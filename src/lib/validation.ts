@@ -26,14 +26,14 @@ const DeliverableType = z.enum(['file', 'url', 'artifact']);
 // Task validation schemas
 export const CreateTaskSchema = z.object({
   title: z.string().min(1, 'Title is required').max(500, 'Title must be 500 characters or less'),
-  description: z.string().max(10000, 'Description must be 10000 characters or less').optional(),
+  description: z.string().max(10000, 'Description must be 10000 characters or less').optional().nullable(),
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
-  assigned_agent_id: z.string().uuid().optional(),
-  created_by_agent_id: z.string().uuid().optional(),
-  business_id: z.string().optional(),
-  workspace_id: z.string().optional(),
-  due_date: z.string().optional(),
+  assigned_agent_id: z.string().uuid().optional().nullable(),
+  created_by_agent_id: z.string().uuid().optional().nullable(),
+  business_id: z.string().optional().nullable(),
+  workspace_id: z.string().optional().nullable(),
+  due_date: z.string().optional().nullable(),
 });
 
 export const UpdateTaskSchema = z.object({

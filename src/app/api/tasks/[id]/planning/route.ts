@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, queryAll, queryOne, run } from '@/lib/db';
+import { getDb, queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON } from '@/lib/planning-utils';
-// File system imports removed - using OpenClaw API instead
 
-// Planning session prefix for OpenClaw (must match agent:main: format)
+// Planning session prefix for OpenClaw
 const PLANNING_SESSION_PREFIX = 'agent:main:planning:';
+
+// Skippy's agent ID
+const SKIPPY_AGENT_ID = '3a90091a-a6e5-4abc-934e-117210d07d73';
 
 // GET /api/tasks/[id]/planning - Get planning state
 export async function GET(
@@ -16,37 +18,42 @@ export async function GET(
   const { id: taskId } = await params;
 
   try {
-    // Get task
     const task = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as {
       id: string;
       title: string;
       description: string;
       status: string;
+      assigned_agent_id?: string;
       planning_session_key?: string;
       planning_messages?: string;
       planning_complete?: number;
       planning_spec?: string;
       planning_agents?: string;
+      planning_stage?: string;
+      optimized_description?: string;
     } | undefined;
     
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // Parse planning messages from JSON
     const messages = task.planning_messages ? JSON.parse(task.planning_messages) : [];
 
-    // Find the latest question (last assistant message with question structure)
+    // Find the latest question
     const lastAssistantMessage = [...messages].reverse().find((m: { role: string }) => m.role === 'assistant');
     let currentQuestion = null;
 
     if (lastAssistantMessage) {
-      // Use extractJSON to handle code blocks and surrounding text
       const parsed = extractJSON(lastAssistantMessage.content);
       if (parsed && 'question' in parsed) {
         currentQuestion = parsed;
       }
     }
+
+    // Determine planning stage
+    const planningStage = task.planning_stage || 'user_planning';
+    const isUserPlanning = planningStage === 'user_planning' && task.assigned_agent_id === SKIPPY_AGENT_ID;
+    const isAgentPlanning = planningStage === 'agent_planning';
 
     return NextResponse.json({
       taskId,
@@ -57,6 +64,10 @@ export async function GET(
       spec: task.planning_spec ? JSON.parse(task.planning_spec) : null,
       agents: task.planning_agents ? JSON.parse(task.planning_agents) : null,
       isStarted: messages.length > 0,
+      planningStage,
+      isUserPlanning,
+      isAgentPlanning,
+      optimizedDescription: task.optimized_description,
     });
   } catch (error) {
     console.error('Failed to get planning state:', error);
@@ -72,15 +83,16 @@ export async function POST(
   const { id: taskId } = await params;
 
   try {
-    // Get task
     const task = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as {
       id: string;
       title: string;
       description: string;
       status: string;
       workspace_id: string;
+      assigned_agent_id?: string;
       planning_session_key?: string;
       planning_messages?: string;
+      planning_stage?: string;
     } | undefined;
 
     if (!task) {
@@ -92,98 +104,175 @@ export async function POST(
       return NextResponse.json({ error: 'Planning already started', sessionKey: task.planning_session_key }, { status: 400 });
     }
 
-    // Check if there are other orchestrators available before starting planning with the default master agent
-    // Get the default master agent for this workspace
-    const defaultMaster = queryOne<{ id: string }>(
-      `SELECT id FROM agents WHERE is_master = 1 AND workspace_id = ? ORDER BY created_at ASC LIMIT 1`,
-      [task.workspace_id]
-    );
+    // Determine planning stage based on assignee
+    const isUserPlanning = task.assigned_agent_id === SKIPPY_AGENT_ID || !task.assigned_agent_id;
+    const planningStage = isUserPlanning ? 'user_planning' : 'agent_planning';
 
-    const otherOrchestrators = queryAll<{
-      id: string;
-      name: string;
-      role: string;
-    }>(
-      `SELECT id, name, role
-       FROM agents
-       WHERE is_master = 1
-       AND id != ?
-       AND workspace_id = ?
-       AND status != 'offline'`,
-      [defaultMaster?.id ?? '', task.workspace_id]
-    );
-
-    if (otherOrchestrators.length > 0) {
-      return NextResponse.json({
-        error: 'Other orchestrators available',
-        message: `There ${otherOrchestrators.length === 1 ? 'is' : 'are'} ${otherOrchestrators.length} other orchestrator${otherOrchestrators.length === 1 ? '' : 's'} available in this workspace: ${otherOrchestrators.map(o => o.name).join(', ')}. Please assign this task to them directly.`,
-        otherOrchestrators,
-      }, { status: 409 }); // 409 Conflict
-    }
-
-    // Create session key for this planning task
+    // Create session key
     const sessionKey = `${PLANNING_SESSION_PREFIX}${taskId}`;
 
-    // Build the initial planning prompt
-    const planningPrompt = `PLANNING REQUEST
-
-Task Title: ${task.title}
-Task Description: ${task.description || 'No description provided'}
-
-You are starting a planning session for this task. Read PLANNING.md for your protocol.
-
-Generate your FIRST question to understand what the user needs. Remember:
-- Questions must be multiple choice
-- Include an "Other" option
-- Be specific to THIS task, not generic
-
-Respond with ONLY valid JSON in this format:
-{
-  "question": "Your question here?",
-  "options": [
-    {"id": "A", "label": "First option"},
-    {"id": "B", "label": "Second option"},
-    {"id": "C", "label": "Third option"},
-    {"id": "other", "label": "Other"}
-  ]
-}`;
-
-    // Connect to OpenClaw and send the planning request
-    const client = getOpenClawClient();
-    if (!client.isConnected()) {
-      await client.connect();
-    }
-
-    // Send planning request to the planning session using agent RPC
-    // This triggers an actual AI agent turn, unlike chat.send which is for messaging
-    const agentResult = await client.call<{ runId: string; acceptedAt: string }>('agent', {
-      sessionKey: sessionKey,
-      message: planningPrompt,
-      idempotencyKey: `planning-start-${taskId}-${Date.now()}`,
-    });
-
-    console.log('[Planning] Agent triggered:', agentResult);
+    // Build the planning prompt based on stage
+    const planningPrompt = isUserPlanning
+      ? buildUserPlanningPrompt(task)
+      : buildAgentPlanningPrompt(task);
 
     // Store the session key and initial message
     const messages = [{ role: 'user', content: planningPrompt, timestamp: Date.now() }];
 
     getDb().prepare(`
       UPDATE tasks
-      SET planning_session_key = ?, planning_messages = ?, status = 'planning'
+      SET planning_session_key = ?, 
+          planning_messages = ?, 
+          planning_stage = ?,
+          status = 'planning'
       WHERE id = ?
-    `).run(sessionKey, JSON.stringify(messages), taskId);
+    `).run(sessionKey, JSON.stringify(messages), planningStage, taskId);
 
-    // Return immediately - frontend will poll for updates
-    // This eliminates the aggressive polling loop that was making 30+ OpenClaw API calls
+    // Trigger Skippy via wake webhook - this sends a system event to the main session
+    // The agent will respond when it processes the event
+    try {
+      const webhookResponse = await fetch('http://127.0.0.1:18789/hooks/wake', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer mc-planning-webhook-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: `PLANNING REQUEST for task "${task.title}" (ID: ${taskId})
+
+Please generate a clarifying question for this task. The question should be multiple choice with 4 options.
+
+Task Description: ${task.description || 'No description'}
+
+Respond in JSON format:
+{
+  "question": "Your question here?",
+  "options": [
+    {"id": "A", "label": "Option 1"},
+    {"id": "B", "label": "Option 2"},
+    {"id": "C", "label": "Option 3"},
+    {"id": "other", "label": "Other (please specify)"}
+  ]
+}
+
+After generating, store your response by calling:
+POST http://localhost:4000/api/tasks/${taskId}/planning/answer
+with body: {"question": {...}, "options": [...]}`,
+          mode: 'now',
+        }),
+      });
+
+      if (webhookResponse.ok) {
+        console.log('[Planning] Wake webhook triggered successfully');
+      } else {
+        console.error('[Planning] Wake webhook failed:', await webhookResponse.text());
+      }
+    } catch (webhookError) {
+      console.error('[Planning] Wake webhook error:', webhookError);
+    }
+
     return NextResponse.json({
       success: true,
       sessionKey,
       messages,
-      note: 'Planning started. Poll GET endpoint for updates.',
+      planningStage,
+      note: 'Planning started. Skippy will generate questions shortly.',
     });
   } catch (error) {
     console.error('Failed to start planning:', error);
     return NextResponse.json({ error: 'Failed to start planning: ' + (error as Error).message }, { status: 500 });
+  }
+}
+
+// PATCH /api/tasks/[id]/planning - Transition planning stage
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id: taskId } = await params;
+
+  try {
+    const body = await request.json();
+    const { action, optimizedDescription, assignedAgentId } = body;
+
+    const task = queryOne<{
+      id: string;
+      planning_stage?: string;
+      planning_session_key?: string;
+    }>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+
+    if (action === 'transition_to_agent') {
+      // Stage 1 → Stage 2: User planning complete, assign to manager
+      if (!optimizedDescription) {
+        return NextResponse.json({ error: 'Optimized description required' }, { status: 400 });
+      }
+      if (!assignedAgentId) {
+        return NextResponse.json({ error: 'Assigned agent required' }, { status: 400 });
+      }
+
+      // Update task with optimized description and new assignee
+      run(`
+        UPDATE tasks
+        SET planning_stage = 'agent_planning',
+            optimized_description = ?,
+            assigned_agent_id = ?,
+            planning_session_key = NULL,
+            planning_messages = NULL,
+            updated_at = datetime('now')
+        WHERE id = ?
+      `, [optimizedDescription, assignedAgentId, taskId]);
+
+      // Broadcast update
+      const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+      if (updatedTask) {
+        broadcast({
+          type: 'task_updated',
+          payload: updatedTask as any,
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Task optimized and assigned. Stage 2 planning ready.',
+        planningStage: 'agent_planning',
+      });
+    }
+
+    if (action === 'complete_planning') {
+      // Stage 2 complete: Ready for execution
+      run(`
+        UPDATE tasks
+        SET planning_stage = 'complete',
+            planning_complete = 1,
+            status = 'assigned',
+            updated_at = datetime('now')
+        WHERE id = ?
+      `, [taskId]);
+
+      // Broadcast update
+      const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
+      if (updatedTask) {
+        broadcast({
+          type: 'task_updated',
+          payload: updatedTask as any,
+        });
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Planning complete. Ready for execution.',
+        planningStage: 'complete',
+      });
+    }
+
+    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+  } catch (error) {
+    console.error('Failed to update planning:', error);
+    return NextResponse.json({ error: 'Failed to update planning' }, { status: 500 });
   }
 }
 
@@ -195,21 +284,6 @@ export async function DELETE(
   const { id: taskId } = await params;
 
   try {
-    // Get task to check session key
-    const task = queryOne<{
-      id: string;
-      planning_session_key?: string;
-      status: string;
-    }>(
-      'SELECT * FROM tasks WHERE id = ?',
-      [taskId]
-    );
-
-    if (!task) {
-      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-    }
-
-    // Clear planning-related fields
     run(`
       UPDATE tasks
       SET planning_session_key = NULL,
@@ -217,23 +291,95 @@ export async function DELETE(
           planning_complete = 0,
           planning_spec = NULL,
           planning_agents = NULL,
+          planning_stage = 'user_planning',
           status = 'inbox',
           updated_at = datetime('now')
       WHERE id = ?
     `, [taskId]);
 
-    // Broadcast task update
     const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (updatedTask) {
       broadcast({
         type: 'task_updated',
-        payload: updatedTask as any, // Cast to any to satisfy SSEEvent payload union type
+        payload: updatedTask as any,
       });
     }
 
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Failed to cancel planning:', error);
-    return NextResponse.json({ error: 'Failed to cancel planning: ' + (error as Error).message }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to cancel planning' }, { status: 500 });
   }
+}
+
+// Helper: Build user planning prompt (Stage 1)
+function buildUserPlanningPrompt(task: { title: string; description: string }) {
+  return `USER PLANNING SESSION - STAGE 1
+
+You are Skippy, helping clarify a task before assigning it to the appropriate manager.
+
+Task Title: ${task.title}
+Task Description: ${task.description || 'No description provided'}
+
+Your goal is to ask clarifying questions to understand:
+1. What the user really wants to accomplish
+2. The scope and priority of the task
+3. Any constraints or requirements
+4. Success criteria
+
+Generate your FIRST question. Remember:
+- Questions must be multiple choice
+- Include an "Other" option for flexibility
+- Be specific to THIS task, not generic
+- Ask ONE question at a time
+
+After 3-5 questions, you will:
+1. Optimize the task description with all context gathered
+2. Recommend which manager should handle this (Dev, Marketing, or Insights)
+
+Respond with ONLY valid JSON:
+{
+  "question": "Your question here?",
+  "options": [
+    {"id": "A", "label": "First option"},
+    {"id": "B", "label": "Second option"},
+    {"id": "C", "label": "Third option"},
+    {"id": "other", "label": "Other"}
+  ]
+}`;
+}
+
+// Helper: Build agent planning prompt (Stage 2)
+function buildAgentPlanningPrompt(task: { title: string; description: string; optimized_description?: string }) {
+  const description = task.optimized_description || task.description;
+  
+  return `AGENT PLANNING SESSION - STAGE 2
+
+You are a manager reviewing an optimized task specification.
+
+Task Title: ${task.title}
+Optimized Description:
+${description || 'No description provided'}
+
+Your goal is to:
+1. Ask any technical/specialized questions needed
+2. Identify dependencies and risks
+3. Confirm you have everything needed to execute
+
+Generate your FIRST question. Remember:
+- Focus on implementation details
+- Questions must be multiple choice
+- Include an "Other" option
+- Be specific to YOUR specialty area
+
+Respond with ONLY valid JSON:
+{
+  "question": "Your question here?",
+  "options": [
+    {"id": "A", "label": "First option"},
+    {"id": "B", "label": "Second option"},
+    {"id": "C", "label": "Third option"},
+    {"id": "other", "label": "Other"}
+  ]
+}`;
 }
