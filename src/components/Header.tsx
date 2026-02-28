@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { Zap, Settings, ChevronLeft, LayoutGrid } from 'lucide-react';
+import { Zap, Settings, ChevronLeft, LayoutGrid, Share2 } from 'lucide-react';
 import { useMissionControl } from '@/lib/store';
 import { format } from 'date-fns';
 import type { Workspace } from '@/lib/types';
@@ -74,6 +74,15 @@ export function Header({ workspace }: HeaderProps) {
               <span className="text-lg">{workspace.icon}</span>
               <span className="font-medium">{workspace.name}</span>
             </div>
+            <span className="text-mc-text-secondary mx-2">|</span>
+            <Link
+              href="/social"
+              className="flex items-center gap-2 px-3 py-1 bg-mc-bg-tertiary rounded hover:bg-mc-bg transition-colors text-mc-text-secondary hover:text-mc-accent-cyan"
+              title="Social Media Content"
+            >
+              <Share2 className="w-4 h-4" />
+              <span className="text-sm">Social</span>
+            </Link>
           </div>
         ) : (
           <Link

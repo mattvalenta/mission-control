@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { 
   Linkedin, 
   Twitter, 
@@ -13,7 +14,8 @@ import {
   RefreshCw,
   ExternalLink,
   Clock,
-  Send
+  Send,
+  LayoutGrid
 } from 'lucide-react';
 
 interface SocialPost {
@@ -25,9 +27,11 @@ interface SocialPost {
   content_category: string;
   content: string;
   approved: boolean;
+  denied: boolean;
   sent: boolean;
   created_at: string;
   approved_at?: string;
+  denied_at?: string;
   sent_at?: string;
   post_url?: string;
   notes?: string;
@@ -131,6 +135,21 @@ export default function SocialMediaPage() {
     }
   };
 
+  const denyPost = async (id: number) => {
+    try {
+      const res = await fetch(`/api/social/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ denied: true }),
+      });
+      if (res.ok) {
+        fetchPosts();
+      }
+    } catch (error) {
+      console.error('Failed to deny post:', error);
+    }
+  };
+
   const saveEdit = async (id: number) => {
     try {
       const res = await fetch(`/api/social/${id}`, {
@@ -168,8 +187,9 @@ export default function SocialMediaPage() {
   const stats = {
     total: posts.length,
     approved: posts.filter(p => p.approved).length,
+    denied: posts.filter(p => p.denied).length,
     sent: posts.filter(p => p.sent).length,
-    pending: posts.filter(p => !p.approved).length,
+    pending: posts.filter(p => !p.approved && !p.denied).length,
   };
 
   return (
@@ -185,6 +205,9 @@ export default function SocialMediaPage() {
             <span className="px-2 py-1 bg-green-900/50 rounded text-green-400">
               {stats.approved} approved
             </span>
+            <span className="px-2 py-1 bg-red-900/50 rounded text-red-400">
+              {stats.denied} denied
+            </span>
             <span className="px-2 py-1 bg-blue-900/50 rounded text-blue-400">
               {stats.sent} sent
             </span>
@@ -193,12 +216,22 @@ export default function SocialMediaPage() {
             </span>
           </div>
         </div>
-        <button
-          onClick={fetchPosts}
-          className="p-2 text-slate-400 hover:text-white transition-colors"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/workspace/default"
+            className="flex items-center gap-2 px-3 py-1.5 bg-slate-700 text-white rounded text-sm hover:bg-slate-600 transition-colors"
+            title="Back to Workspace"
+          >
+            <LayoutGrid className="w-4 h-4" />
+            <span>Workspace</span>
+          </Link>
+          <button
+            onClick={fetchPosts}
+            className="p-2 text-slate-400 hover:text-white transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -281,11 +314,13 @@ export default function SocialMediaPage() {
                     <div
                       key={post.id}
                       className={`bg-slate-800 rounded-lg border-2 overflow-hidden ${
-                        post.sent 
-                          ? 'border-blue-600/50 opacity-60' 
-                          : post.approved 
-                            ? 'border-green-600/50' 
-                            : 'border-amber-600/50'
+                        post.denied
+                          ? 'border-red-600/50 opacity-60'
+                          : post.sent 
+                            ? 'border-blue-600/50 opacity-60' 
+                            : post.approved 
+                              ? 'border-green-600/50' 
+                              : 'border-amber-600/50'
                       }`}
                     >
                       {/* Header */}
@@ -299,7 +334,11 @@ export default function SocialMediaPage() {
                           </span>
                         </div>
                         <div className="flex items-center gap-1">
-                          {post.sent ? (
+                          {post.denied ? (
+                            <span className="text-xs text-red-400 flex items-center gap-1">
+                              <X className="w-3 h-3" /> Denied
+                            </span>
+                          ) : post.sent ? (
                             <span className="text-xs text-blue-400 flex items-center gap-1">
                               <Send className="w-3 h-3" /> Sent
                             </span>
@@ -369,12 +408,28 @@ export default function SocialMediaPage() {
                               )}
                             </div>
                             <div className="flex gap-2">
-                              {!post.approved && !post.sent && (
+                              {!post.approved && !post.denied && !post.sent && (
+                                <>
+                                  <button
+                                    onClick={() => denyPost(post.id)}
+                                    className="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-500 flex items-center gap-1"
+                                  >
+                                    <X className="w-3 h-3" /> Deny
+                                  </button>
+                                  <button
+                                    onClick={() => approvePost(post.id)}
+                                    className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-500 flex items-center gap-1"
+                                  >
+                                    <Check className="w-3 h-3" /> Approve
+                                  </button>
+                                </>
+                              )}
+                              {post.denied && !post.sent && (
                                 <button
                                   onClick={() => approvePost(post.id)}
                                   className="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-500 flex items-center gap-1"
                                 >
-                                  <Check className="w-3 h-3" /> Approve
+                                  <Check className="w-3 h-3" /> Re-approve
                                 </button>
                               )}
                               {post.approved && !post.sent && (

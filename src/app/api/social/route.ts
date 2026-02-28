@@ -15,9 +15,11 @@ interface SocialPost {
   content_category: string;
   content: string;
   approved: boolean;
+  denied: boolean;
   sent: boolean;
   created_at: string;
   approved_at?: string;
+  denied_at?: string;
   sent_at?: string;
   post_url?: string;
   notes?: string;
@@ -34,6 +36,7 @@ export async function GET(request: NextRequest) {
     const platform = searchParams.get('platform');
     const account = searchParams.get('account');
     const approved = searchParams.get('approved');
+    const denied = searchParams.get('denied');
     const sent = searchParams.get('sent');
     const week = searchParams.get('week');
 
@@ -66,6 +69,10 @@ export async function GET(request: NextRequest) {
     if (approved !== null && approved !== 'all') {
       sql += ` AND p.approved = $${paramIndex++}`;
       params.push(approved === 'true');
+    }
+    if (denied !== null && denied !== 'all') {
+      sql += ` AND p.denied = $${paramIndex++}`;
+      params.push(denied === 'true');
     }
     if (sent !== null && sent !== 'all') {
       sql += ` AND p.sent = $${paramIndex++}`;

@@ -32,6 +32,19 @@ export async function PATCH(
       values.push(body.approved);
       if (body.approved) {
         updates.push(`approved_at = NOW()`);
+        // Clear denied status if approving
+        updates.push(`denied = FALSE`);
+        updates.push(`denied_at = NULL`);
+      }
+    }
+    if (body.denied !== undefined) {
+      updates.push(`denied = $${paramIndex++}`);
+      values.push(body.denied);
+      if (body.denied) {
+        updates.push(`denied_at = NOW()`);
+        // Clear approved status if denying
+        updates.push(`approved = FALSE`);
+        updates.push(`approved_at = NULL`);
       }
     }
     if (body.sent !== undefined) {

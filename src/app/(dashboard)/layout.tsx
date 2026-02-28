@@ -1,6 +1,6 @@
 import { Metadata } from 'next';
 import Link from 'next/link';
-import { LayoutDashboard, CheckSquare, FileText, Calendar, FolderOpen, Users, Building2 } from 'lucide-react';
+import { LayoutDashboard, FileText, Calendar, FolderOpen, Users, Building2, Share2 } from 'lucide-react';
 
 export const metadata: Metadata = {
   title: 'Mission Control',
@@ -8,9 +8,9 @@ export const metadata: Metadata = {
 };
 
 const navItems = [
-  { href: '/tasks', label: 'Tasks', icon: CheckSquare },
   { href: '/pipeline', label: 'Pipeline', icon: FileText },
   { href: '/calendar', label: 'Calendar', icon: Calendar },
+  { href: '/social', label: 'Social', icon: Share2 },
   { href: '/memory', label: 'Memory', icon: FolderOpen },
   { href: '/team', label: 'Team', icon: Users },
   { href: '/office', label: 'Office', icon: Building2 },
