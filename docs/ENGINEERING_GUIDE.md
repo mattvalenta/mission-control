@@ -1,8 +1,8 @@
 # Mission Control - Engineering Guide
 
-**Version:** 2.0.0  
+**Version:** 2.1.0  
 **Last Updated:** March 1, 2026  
-**Status:** Architecture Redesign
+**Status:** Architecture Redesign - Updated with Dev Manager Review
 
 ---
 
@@ -15,10 +15,15 @@
 5. [Database Schema](#database-schema)
 6. [Real-Time Synchronization](#real-time-synchronization)
 7. [Distributed Job Queue](#distributed-job-queue)
-8. [API Reference](#api-reference)
-9. [Implementation Roadmap](#implementation-roadmap)
-10. [Security Considerations](#security-considerations)
-11. [Monitoring & Observability](#monitoring--observability)
+8. [Dead Letter Queue](#dead-letter-queue)
+9. [Circuit Breaker Pattern](#circuit-breaker-pattern)
+10. [Token Pricing & Cost Calculation](#token-pricing--cost-calculation)
+11. [Migration Strategy](#migration-strategy)
+12. [API Reference](#api-reference)
+13. [Implementation Roadmap](#implementation-roadmap)
+14. [Security Considerations](#security-considerations)
+15. [Monitoring & Observability](#monitoring--observability)
+16. [Dev Manager Review Summary](#dev-manager-review-summary)
 
 ---
 
@@ -123,7 +128,7 @@ This guide documents the transition from:
 │  │                      SHARED TABLES                               ││
 │  │  • tasks, agents, activities, deliverables                       ││
 │  │  • token_usage, audit_log, quality_reviews                       ││
-│  │  • job_queue (distributed task execution)                        ││
+│  │  • job_queue, dead_letter_queue (distributed task execution)     ││
 │  │  • mc_instances (instance registry)                              ││
 │  └─────────────────────────────────────────────────────────────────┘│
 │                                                                      │
@@ -133,6 +138,7 @@ This guide documents the transition from:
 │  │  • agent_updates   → Broadcast agent status changes              ││
 │  │  • activity_updates → Broadcast new activities                   ││
 │  │  • job_available   → Signal new background job                   ││
+│  │  • alerts          → Dead letter queue alerts                    ││
 │  └─────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────┘
            │                    │                    │
@@ -163,46 +169,27 @@ This guide documents the transition from:
 4. **Distributed Job Execution** - Background tasks run on any available instance
 5. **Gateway per Agent** - Each agent controls its own OpenClaw Gateway
 
-### Instance Identity
-
-Each Mission Control instance identifies itself:
-
-```typescript
-// Environment variables for each instance
-MC_INSTANCE_ID=dev-manager-mac-mini
-MC_INSTANCE_ROLE=worker  // 'master' or 'worker'
-MC_AGENT_NAME=Dev Manager
-
-// Auto-generated on startup if not set
-const instanceId = process.env.MC_INSTANCE_ID || `${os.hostname()}-${Date.now()}`;
-```
-
-### Conflict Resolution
-
-**Optimistic Locking** for concurrent updates:
-
-```sql
--- Add version column to contested tables
-ALTER TABLE tasks ADD COLUMN version INTEGER DEFAULT 1;
-
--- Update with version check
-UPDATE tasks 
-SET status = 'in_progress', version = version + 1, updated_at = NOW()
-WHERE id = $1 AND version = $2;
-
--- If affected_rows = 0, another instance updated first
--- Application must retry with fresh data
-```
-
 ---
 
 ## Features to Adopt from Builderz-Labs
 
-The [builderz-labs/mission-control](https://github.com/builderz-labs/mission-control) repository implements several features worth incorporating. Below is the complete feature adoption plan.
+The [builderz-labs/mission-control](https://github.com/builderz-labs/mission-control) repository implements several features worth incorporating.
 
-### 1. Token Usage & Cost Tracking ⭐ HIGH PRIORITY
+### Priority Matrix
 
-**Why:** Visibility into API costs per agent, per model, per task.
+| Feature | Priority | Effort | Impact |
+|---------|----------|--------|--------|
+| Token Usage & Cost Tracking | 🔴 High | 4-6 hours | High visibility into costs |
+| Audit Logging | 🔴 High | 2-3 hours | Security & debugging |
+| Dead Letter Queue | 🔴 High | 2 hours | Reliability |
+| Background Scheduler | 🟡 Medium | 3-4 hours | Automation |
+| Outbound Webhooks | 🟡 Medium | 3-4 hours | Integration |
+| Circuit Breaker | 🟡 Medium | 3 hours | Reliability |
+| Quality Review Gates | 🟡 Medium | 2-3 hours | Workflow control |
+| Rate Limiting | 🟢 Low | 1-2 hours | Security (internal only) |
+| RBAC | 🟢 Low | 4-5 hours | Multi-user (not needed now) |
+
+### 1. Token Usage & Cost Tracking 🔴 HIGH PRIORITY
 
 **Schema Addition:**
 ```sql
@@ -226,66 +213,7 @@ CREATE INDEX idx_token_usage_date ON token_usage(created_at);
 CREATE INDEX idx_token_usage_model ON token_usage(model);
 ```
 
-**API Endpoints:**
-```
-GET  /api/tokens              - List token usage with filters
-GET  /api/tokens/summary      - Aggregated stats (by agent, model, date range)
-GET  /api/tokens/trends       - Time-series data for charts
-```
-
-**UI Components:**
-- Token usage dashboard with per-model breakdown
-- Trend charts (Recharts integration)
-- Cost analysis by agent
-
----
-
-### 2. Quality Review Gates ⭐ HIGH PRIORITY
-
-**Why:** Formal approval workflow prevents premature task completion.
-
-**Schema Addition:**
-```sql
--- Quality reviews
-CREATE TABLE quality_reviews (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  reviewer_id TEXT REFERENCES agents(id),
-  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested')),
-  notes TEXT,
-  reviewed_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_quality_reviews_task ON quality_reviews(task_id);
-CREATE INDEX idx_quality_reviews_status ON quality_reviews(status);
-```
-
-**Task Status Update:**
-```sql
--- Add quality_review status to tasks
-ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
-ALTER TABLE tasks ADD CONSTRAINT tasks_status_check 
-  CHECK (status IN ('planning', 'inbox', 'assigned', 'in_progress', 'testing', 'review', 'quality_review', 'done'));
-```
-
-**API Endpoints:**
-```
-POST /api/tasks/:id/review    - Submit quality review
-GET  /api/tasks/:id/reviews   - List all reviews for task
-```
-
-**Workflow:**
-1. Agent completes work → sets status to `review`
-2. Reviewer approves/rejects → creates quality_review record
-3. If approved → status changes to `quality_review` → Master can set to `done`
-4. If rejected → status returns to `in_progress` with notes
-
----
-
-### 3. Audit Logging ⭐ HIGH PRIORITY
-
-**Why:** Security forensics, compliance, debugging.
+### 2. Audit Logging 🔴 HIGH PRIORITY
 
 **Schema Addition:**
 ```sql
@@ -309,76 +237,7 @@ CREATE INDEX idx_audit_actor ON audit_log(actor);
 CREATE INDEX idx_audit_created ON audit_log(created_at DESC);
 ```
 
-**Tracked Actions:**
-- `login`, `logout`, `login_failed`
-- `user_created`, `user_deleted`, `password_change`
-- `agent_created`, `agent_deleted`
-- `task_created`, `task_deleted`, `task_dispatched`
-- `settings_changed`
-- `api_key_generated`, `api_key_revoked`
-
-**API Endpoints:**
-```
-GET /api/audit               - List audit events (admin only)
-GET /api/audit/security      - Security-specific events (failed logins, etc.)
-```
-
----
-
-### 4. Rate Limiting ⭐ MEDIUM PRIORITY
-
-**Why:** Prevent API abuse, protect against runaway agents.
-
-**Implementation:**
-```typescript
-// src/lib/rate-limit.ts
-interface RateLimitConfig {
-  windowMs: number;
-  maxRequests: number;
-  keyGenerator: (req: NextRequest) => string;
-}
-
-const defaultConfig: RateLimitConfig = {
-  windowMs: 60000,  // 1 minute
-  maxRequests: 100,
-  keyGenerator: (req) => req.headers.get('x-forwarded-for') || 'unknown'
-};
-
-export function rateLimiter(config: RateLimitConfig = defaultConfig) {
-  const requests = new Map<string, number[]>();
-  
-  return (req: NextRequest): NextResponse | null => {
-    const key = config.keyGenerator(req);
-    const now = Date.now();
-    const windowStart = now - config.windowMs;
-    
-    const timestamps = (requests.get(key) || []).filter(t => t > windowStart);
-    
-    if (timestamps.length >= config.maxRequests) {
-      return NextResponse.json(
-        { error: 'Too many requests', retryAfter: config.windowMs / 1000 },
-        { status: 429, headers: { 'Retry-After': String(config.windowMs / 1000) } }
-      );
-    }
-    
-    requests.set(key, [...timestamps, now]);
-    return null; // Allow request
-  };
-}
-```
-
-**Apply to mutation endpoints:**
-```typescript
-// In API routes
-const rateCheck = rateLimiter()(request);
-if (rateCheck) return rateCheck;
-```
-
----
-
-### 5. Background Scheduler ⭐ MEDIUM PRIORITY
-
-**Why:** Automated maintenance, health checks, cleanup.
+### 3. Background Scheduler 🟡 MEDIUM PRIORITY
 
 **Schema Addition:**
 ```sql
@@ -410,63 +269,7 @@ CREATE INDEX idx_job_executions_job ON job_executions(job_id);
 CREATE INDEX idx_job_executions_status ON job_executions(status);
 ```
 
-**Built-in Jobs:**
-```typescript
-const builtinJobs = [
-  {
-    name: 'cleanup-stale-sessions',
-    handler: 'cleanupStaleSessions',
-    interval_seconds: 3600,  // 1 hour
-  },
-  {
-    name: 'backup-database',
-    handler: 'backupDatabase',
-    interval_seconds: 86400,  // 24 hours
-  },
-  {
-    name: 'check-agent-heartbeats',
-    handler: 'checkAgentHeartbeats',
-    interval_seconds: 1800,  // 30 minutes
-  },
-  {
-    name: 'aggregate-token-usage',
-    handler: 'aggregateTokenUsage',
-    interval_seconds: 3600,  // 1 hour
-  },
-  {
-    name: 'cleanup-old-audit-logs',
-    handler: 'cleanupOldAuditLogs',
-    interval_seconds: 604800,  // 7 days
-  },
-];
-```
-
-**Distributed Execution:**
-```typescript
-// Only one instance runs each job
-async function claimAndRunJob(jobName: string, instanceId: string) {
-  const result = await queryOne<{ id: string }>(
-    `UPDATE scheduled_jobs 
-     SET last_run = NOW(), next_run = NOW() + (interval_seconds * INTERVAL '1 second')
-     WHERE name = $1 
-       AND (next_run IS NULL OR next_run <= NOW())
-       AND pg_try_advisory_lock(hashtext(name))
-     RETURNING id`,
-    [jobName]
-  );
-  
-  if (result) {
-    await runJobHandler(jobName);
-    await run(`SELECT pg_advisory_unlock(hashtext($1))`, [jobName]);
-  }
-}
-```
-
----
-
-### 6. Outbound Webhooks ⭐ MEDIUM PRIORITY
-
-**Why:** Integration with external systems (Slack, email, custom handlers).
+### 4. Outbound Webhooks 🟡 MEDIUM PRIORITY
 
 **Schema Addition:**
 ```sql
@@ -496,143 +299,92 @@ CREATE TABLE webhook_deliveries (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_webhook_deliveries_status ON webhook_deliveries(status) 
+CREATE INDEX idx_webhook_deliveries_pending ON webhook_deliveries(status) 
   WHERE status IN ('pending', 'retrying');
 ```
 
-**Triggered Events:**
-- `task.created`, `task.completed`, `task.failed`
-- `agent.status_changed`
-- `quality_review.submitted`
-- `token_threshold_exceeded`
-
-**Delivery with Retry:**
-```typescript
-async function deliverWebhook(webhookId: string, eventType: string, payload: any) {
-  const webhook = await queryOne<Webhook>('SELECT * FROM webhooks WHERE id = $1', [webhookId]);
-  if (!webhook || !webhook.enabled) return;
-  
-  const delivery = await queryOne<WebhookDelivery>(
-    `INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status)
-     VALUES ($1, $2, $3, 'pending')
-     RETURNING *`,
-    [webhookId, eventType, JSON.stringify(payload)]
-  );
-  
-  // Process delivery in background
-  processWebhookDelivery(delivery.id);
-}
-
-async function processWebhookDelivery(deliveryId: string) {
-  // Exponential backoff retry: 1m, 5m, 15m
-  // HMAC signature for verification
-  // Record response code and body
-}
-```
-
----
-
-### 7. Role-Based Access Control (RBAC) ⭐ LOW PRIORITY
-
-**Why:** Multi-user access with different permission levels.
+### 5. Quality Review Gates 🟡 MEDIUM PRIORITY
 
 **Schema Addition:**
 ```sql
--- Users table (for human users, not agents)
-CREATE TABLE users (
+-- Quality reviews
+CREATE TABLE quality_reviews (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  username TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  display_name TEXT,
-  role TEXT NOT NULL CHECK (role IN ('viewer', 'operator', 'admin')),
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- Sessions for browser auth
-CREATE TABLE user_sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id TEXT REFERENCES users(id),
-  token TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMP NOT NULL,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  reviewer_id TEXT REFERENCES agents(id),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested')),
+  notes TEXT,
+  reviewed_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_user_sessions_token ON user_sessions(token);
+CREATE INDEX idx_quality_reviews_task ON quality_reviews(task_id);
+CREATE INDEX idx_quality_reviews_status ON quality_reviews(status);
 ```
 
-**Permission Matrix:**
-```typescript
-const permissions = {
-  viewer: [
-    'read:tasks', 'read:agents', 'read:activities', 'read:deliverables',
-    'read:token_usage', 'read:calendar'
-  ],
-  operator: [
-    'read:tasks', 'write:tasks', 'dispatch:tasks',
-    'read:agents', 'write:agents', 'spawn:agents',
-    'read:activities', 'write:activities',
-    'read:deliverables', 'write:deliverables',
-    'submit:reviews'
-  ],
-  admin: [
-    '*'  // Full access
-  ]
-};
-```
+### 6. Rate Limiting 🟢 LOW PRIORITY
 
-**Implementation:**
 ```typescript
-// src/lib/auth.ts
-export function requireRole(req: NextRequest, requiredRole: 'viewer' | 'operator' | 'admin') {
-  const session = getSessionFromRequest(req);
-  if (!session) return { error: 'Unauthorized', status: 401 };
+// src/lib/rate-limit.ts
+interface RateLimitConfig {
+  windowMs: number;
+  maxRequests: number;
+  keyGenerator: (req: NextRequest) => string;
+}
+
+export function rateLimiter(config: RateLimitConfig = {
+  windowMs: 60000,
+  maxRequests: 100,
+  keyGenerator: (req) => req.headers.get('x-forwarded-for') || 'unknown'
+}) {
+  const requests = new Map<string, number[]>();
   
-  const roleHierarchy = { viewer: 0, operator: 1, admin: 2 };
-  if (roleHierarchy[session.user.role] < roleHierarchy[requiredRole]) {
-    return { error: 'Forbidden', status: 403 };
-  }
-  
-  return { user: session.user };
+  return (req: NextRequest): NextResponse | null => {
+    const key = config.keyGenerator(req);
+    const now = Date.now();
+    const timestamps = (requests.get(key) || []).filter(t => t > now - config.windowMs);
+    
+    if (timestamps.length >= config.maxRequests) {
+      return NextResponse.json(
+        { error: 'Too many requests', retryAfter: config.windowMs / 1000 },
+        { status: 429 }
+      );
+    }
+    
+    requests.set(key, [...timestamps, now]);
+    return null;
+  };
 }
 ```
 
----
+### 7. Feature Flags 🟡 MEDIUM PRIORITY
 
-### 8. Smart Polling with Visibility Detection ⭐ LOW PRIORITY
+**Schema Addition:**
+```sql
+-- Feature flags for gradual rollout
+CREATE TABLE feature_flags (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  enabled BOOLEAN DEFAULT false,
+  rollout_percentage INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
 
-**Why:** Reduce unnecessary updates when tab is hidden.
+### 8. Metrics Collection 🟡 MEDIUM PRIORITY
 
-**Implementation:**
-```typescript
-// src/hooks/useSmartPolling.ts
-export function useSmartPolling(refreshFn: () => void, intervalMs: number) {
-  const intervalRef = useRef<NodeJS.Timeout>();
-  const isPausedRef = useRef(false);
-  
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.hidden) {
-        clearInterval(intervalRef.current);
-        isPausedRef.current = true;
-      } else {
-        isPausedRef.current = false;
-        refreshFn();  // Immediate refresh when tab becomes visible
-        intervalRef.current = setInterval(refreshFn, intervalMs);
-      }
-    };
-    
-    document.addEventListener('visibilitychange', handleVisibility);
-    intervalRef.current = setInterval(refreshFn, intervalMs);
-    
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      clearInterval(intervalRef.current);
-    };
-  }, [refreshFn, intervalMs]);
-  
-  return { isPaused: isPausedRef.current };
-}
+**Schema Addition:**
+```sql
+-- Metrics collection
+CREATE TABLE metrics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  value REAL NOT NULL,
+  tags JSONB,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_metrics_name_date ON metrics(name, created_at DESC);
 ```
 
 ---
@@ -747,87 +499,11 @@ CREATE INDEX idx_tasks_workspace ON tasks(workspace_id);
 CREATE INDEX idx_tasks_tier ON tasks(tier);
 
 -- ============================================================
--- PLANNING
--- ============================================================
-
-CREATE TABLE planning_questions (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  category TEXT NOT NULL,
-  question TEXT NOT NULL,
-  question_type TEXT DEFAULT 'multiple_choice' CHECK (question_type IN ('multiple_choice', 'text', 'yes_no')),
-  options JSONB,
-  answer TEXT,
-  answered_at TIMESTAMP,
-  sort_order INTEGER DEFAULT 0,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_planning_questions_task ON planning_questions(task_id, sort_order);
-
-CREATE TABLE planning_specs (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
-  spec_markdown TEXT NOT NULL,
-  locked_at TIMESTAMP NOT NULL,
-  locked_by TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
--- ============================================================
--- TASK ACTIVITIES & DELIVERABLES
--- ============================================================
-
-CREATE TABLE task_activities (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  agent_id TEXT REFERENCES agents(id),
-  activity_type TEXT NOT NULL,
-  message TEXT NOT NULL,
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_activities_task ON task_activities(task_id, created_at DESC);
-
-CREATE TABLE task_deliverables (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  deliverable_type TEXT NOT NULL CHECK (deliverable_type IN ('file', 'url', 'artifact')),
-  title TEXT NOT NULL,
-  path TEXT,
-  description TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_deliverables_task ON task_deliverables(task_id);
-
--- ============================================================
--- OPENCLAW SESSIONS
--- ============================================================
-
-CREATE TABLE openclaw_sessions (
-  id TEXT PRIMARY KEY,
-  agent_id TEXT REFERENCES agents(id),
-  openclaw_session_id TEXT NOT NULL,
-  channel TEXT,
-  status TEXT DEFAULT 'active',
-  session_type TEXT DEFAULT 'persistent' CHECK (session_type IN ('persistent', 'subagent')),
-  task_id TEXT REFERENCES tasks(id),
-  ended_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_openclaw_sessions_agent ON openclaw_sessions(agent_id);
-CREATE INDEX idx_openclaw_sessions_task ON openclaw_sessions(task_id);
-
--- ============================================================
 -- TOKEN USAGE
 -- ============================================================
 
 CREATE TABLE token_usage (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id TEXT,
   agent_id TEXT REFERENCES agents(id),
   task_id TEXT REFERENCES tasks(id),
@@ -845,28 +521,58 @@ CREATE INDEX idx_token_usage_date ON token_usage(created_at);
 CREATE INDEX idx_token_usage_model ON token_usage(model);
 
 -- ============================================================
--- QUALITY REVIEWS
+-- DEAD LETTER QUEUE
 -- ============================================================
 
-CREATE TABLE quality_reviews (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  reviewer_id TEXT REFERENCES agents(id),
-  status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested')),
-  notes TEXT,
-  reviewed_at TIMESTAMP,
+CREATE TABLE dead_letter_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_name TEXT NOT NULL,
+  payload JSONB,
+  failure_reason TEXT,
+  retry_count INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  resolved_at TIMESTAMP,
+  resolved_by TEXT
+);
+
+CREATE INDEX idx_dlq_created ON dead_letter_queue(created_at DESC);
+CREATE INDEX idx_dlq_resolved ON dead_letter_queue(resolved_at) WHERE resolved_at IS NULL;
+
+-- ============================================================
+-- SCHEDULED JOBS
+-- ============================================================
+
+CREATE TABLE scheduled_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  handler TEXT NOT NULL,
+  interval_seconds INTEGER NOT NULL,
+  last_run TIMESTAMP,
+  next_run TIMESTAMP,
+  enabled BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_quality_reviews_task ON quality_reviews(task_id);
-CREATE INDEX idx_quality_reviews_status ON quality_reviews(status);
+CREATE TABLE job_executions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id TEXT REFERENCES scheduled_jobs(id),
+  instance_id TEXT NOT NULL,
+  status TEXT CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TIMESTAMP,
+  completed_at TIMESTAMP,
+  error TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_job_executions_job ON job_executions(job_id);
+CREATE INDEX idx_job_executions_status ON job_executions(status);
 
 -- ============================================================
 -- AUDIT LOG
 -- ============================================================
 
 CREATE TABLE audit_log (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   action TEXT NOT NULL,
   actor TEXT NOT NULL,
   actor_id TEXT,
@@ -884,40 +590,11 @@ CREATE INDEX idx_audit_actor ON audit_log(actor);
 CREATE INDEX idx_audit_created ON audit_log(created_at DESC);
 
 -- ============================================================
--- SCHEDULED JOBS
--- ============================================================
-
-CREATE TABLE scheduled_jobs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  name TEXT NOT NULL UNIQUE,
-  handler TEXT NOT NULL,
-  interval_seconds INTEGER NOT NULL,
-  last_run TIMESTAMP,
-  next_run TIMESTAMP,
-  enabled BOOLEAN DEFAULT true,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE job_executions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  job_id TEXT REFERENCES scheduled_jobs(id),
-  instance_id TEXT NOT NULL,
-  status TEXT CHECK (status IN ('running', 'completed', 'failed')),
-  started_at TIMESTAMP,
-  completed_at TIMESTAMP,
-  error TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_job_executions_job ON job_executions(job_id);
-CREATE INDEX idx_job_executions_status ON job_executions(status);
-
--- ============================================================
 -- WEBHOOKS
 -- ============================================================
 
 CREATE TABLE webhooks (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   url TEXT NOT NULL,
   secret TEXT,
@@ -927,7 +604,7 @@ CREATE TABLE webhooks (
 );
 
 CREATE TABLE webhook_deliveries (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   webhook_id TEXT REFERENCES webhooks(id),
   event_type TEXT NOT NULL,
   payload JSONB NOT NULL,
@@ -944,110 +621,34 @@ CREATE INDEX idx_webhook_deliveries_pending ON webhook_deliveries(status)
   WHERE status IN ('pending', 'retrying');
 
 -- ============================================================
--- CONTENT PIPELINE
+-- FEATURE FLAGS
 -- ============================================================
 
-CREATE TABLE content_items (
+CREATE TABLE feature_flags (
   id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  type TEXT NOT NULL CHECK (type IN ('linkedin_post', 'x_post', 'x_thread', 'carousel', 'blog')),
-  platform TEXT NOT NULL CHECK (platform IN ('linkedin', 'x', 'facebook', 'instagram')),
-  stage TEXT NOT NULL DEFAULT 'idea' CHECK (stage IN ('idea', 'research', 'draft', 'humanize', 'schedule', 'publish', 'analysis')),
-  content TEXT,
-  research TEXT,
-  schedule TEXT,
-  analysis TEXT,
-  assigned_to TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW(),
-  published_at TIMESTAMP
-);
-
-CREATE INDEX idx_content_items_stage ON content_items(stage);
-CREATE INDEX idx_content_items_platform ON content_items(platform);
-
--- ============================================================
--- CALENDAR EVENTS
--- ============================================================
-
-CREATE TABLE calendar_events (
-  id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  description TEXT,
-  start_time TIMESTAMP NOT NULL,
-  end_time TIMESTAMP,
-  type TEXT NOT NULL CHECK (type IN ('cron', 'meeting', 'deadline', 'reminder')),
-  tier TEXT NOT NULL DEFAULT 'manager' CHECK (tier IN ('skippy', 'manager', 'subagent')),
-  agent_id TEXT NOT NULL,
-  agent_name TEXT NOT NULL,
-  color TEXT,
-  recurring TEXT,
+  name TEXT NOT NULL UNIQUE,
+  enabled BOOLEAN DEFAULT false,
+  rollout_percentage INTEGER DEFAULT 0,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_calendar_events_start ON calendar_events(start_time);
-CREATE INDEX idx_calendar_events_agent ON calendar_events(agent_id);
-
 -- ============================================================
--- TEAM MEMBERS
+-- METRICS
 -- ============================================================
 
-CREATE TABLE team_members (
-  id TEXT PRIMARY KEY,
+CREATE TABLE metrics (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  tier TEXT NOT NULL CHECK (tier IN ('skippy', 'manager', 'subagent')),
-  role TEXT NOT NULL,
-  manager_id TEXT REFERENCES team_members(id),
-  status TEXT DEFAULT 'offline' CHECK (status IN ('active', 'idle', 'on-demand', 'offline')),
-  discord_id TEXT,
-  workspace_path TEXT,
-  avatar_emoji TEXT DEFAULT '🤖',
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_team_members_tier ON team_members(tier);
-CREATE INDEX idx_team_members_manager ON team_members(manager_id);
-
--- ============================================================
--- USERS (RBAC)
--- ============================================================
-
-CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  username TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  display_name TEXT,
-  role TEXT NOT NULL CHECK (role IN ('viewer', 'operator', 'admin')),
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE user_sessions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id TEXT REFERENCES users(id),
-  token TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMP NOT NULL,
+  value REAL NOT NULL,
+  tags JSONB,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_user_sessions_token ON user_sessions(token);
+CREATE INDEX idx_metrics_name_date ON metrics(name, created_at DESC);
 
 -- ============================================================
--- EVENTS (LIVE FEED)
+-- [Additional tables: planning, activities, etc. - see full schema in repo]
 -- ============================================================
-
-CREATE TABLE events (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  agent_id TEXT REFERENCES agents(id),
-  task_id TEXT REFERENCES tasks(id),
-  message TEXT NOT NULL,
-  metadata JSONB,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX idx_events_created ON events(created_at DESC);
 ```
 
 ---
@@ -1056,7 +657,16 @@ CREATE INDEX idx_events_created ON events(created_at DESC);
 
 ### PostgreSQL LISTEN/NOTIFY
 
-Each Mission Control instance subscribes to PostgreSQL notification channels:
+#### ⚠️ Critical Limitations (from Dev Manager Review)
+
+| Issue | Risk | Mitigation |
+|-------|------|------------|
+| Payload size limit (8KB) | 🔴 High | Send ID + fetch pattern |
+| Connection drop handling | 🟡 Medium | Add reconnection logic |
+| Missed notifications during downtime | 🟡 Medium | Hybrid poll fallback |
+| Ordering guarantees | ✅ OK | Order preserved within connection |
+
+#### Recommended Pattern
 
 ```typescript
 // src/lib/db/notify.ts
@@ -1070,32 +680,56 @@ export type NotificationChannel =
   | 'agent_updates' 
   | 'activity_updates'
   | 'deliverable_updates'
-  | 'job_available';
+  | 'job_available'
+  | 'alerts';
 
-export interface NotificationPayload {
-  type: string;
-  instanceId: string;
-  timestamp: number;
-  data: any;
+// ⚠️ KEY: Don't send full payload - send reference only
+// Payload must be under 8KB
+export async function broadcastNotification(
+  channel: NotificationChannel, 
+  type: string, 
+  data: any
+) {
+  const instanceId = process.env.MC_INSTANCE_ID || 'unknown';
+  const payload = JSON.stringify({ type, instanceId, timestamp: Date.now(), data });
+  
+  // If payload > 7KB, store and reference
+  if (payload.length > 7000) {
+    const notificationId = await storeNotification(data);
+    await pool.query('SELECT pg_notify($1, $2)', [
+      channel, 
+      JSON.stringify({ type, instanceId, timestamp: Date.now(), notificationId, truncated: true })
+    ]);
+  } else {
+    await pool.query('SELECT pg_notify($1, $2)', [channel, payload]);
+  }
 }
 
-// Start listening on all channels
+// Robust listener with reconnection
 export async function startNotificationListener(
-  onNotification: (channel: NotificationChannel, payload: NotificationPayload) => void
+  onNotification: (channel: NotificationChannel, payload: any) => void
 ) {
-  const client = await listenPool.connect();
+  let client = await listenPool.connect();
   
-  // Subscribe to all channels
-  await client.query('LISTEN task_updates');
-  await client.query('LISTEN agent_updates');
-  await client.query('LISTEN activity_updates');
-  await client.query('LISTEN deliverable_updates');
-  await client.query('LISTEN job_available');
+  const setupListener = async () => {
+    await client.query('LISTEN task_updates');
+    await client.query('LISTEN agent_updates');
+    await client.query('LISTEN activity_updates');
+    await client.query('LISTEN deliverable_updates');
+    await client.query('LISTEN job_available');
+    await client.query('LISTEN alerts');
+  };
+  
+  await setupListener();
   
   client.on('notification', (msg) => {
     if (msg.channel && msg.payload) {
       try {
-        const payload = JSON.parse(msg.payload) as NotificationPayload;
+        const payload = JSON.parse(msg.payload);
+        // If truncated, fetch full data
+        if (payload.truncated && payload.notificationId) {
+          payload.data = await fetchNotification(payload.notificationId);
+        }
         onNotification(msg.channel as NotificationChannel, payload);
       } catch (err) {
         console.error('Failed to parse notification:', err);
@@ -1103,183 +737,98 @@ export async function startNotificationListener(
     }
   });
   
-  console.log('[NOTIFY] Listening for PostgreSQL notifications');
-}
-
-// Broadcast a notification
-export async function broadcastNotification(
-  channel: NotificationChannel, 
-  type: string, 
-  data: any
-) {
-  const instanceId = process.env.MC_INSTANCE_ID || 'unknown';
-  const payload: NotificationPayload = {
-    type,
-    instanceId,
-    timestamp: Date.now(),
-    data
-  };
-  
-  await pool.query(
-    'SELECT pg_notify($1, $2)',
-    [channel, JSON.stringify(payload)]
-  );
-}
-
-// Helper functions for common broadcasts
-export const notify = {
-  taskUpdated: (taskId: string, updates: any) => 
-    broadcastNotification('task_updates', 'task_updated', { taskId, updates }),
-  
-  taskCreated: (task: any) => 
-    broadcastNotification('task_updates', 'task_created', { task }),
-  
-  agentStatusChanged: (agentId: string, status: string) => 
-    broadcastNotification('agent_updates', 'agent_status_changed', { agentId, status }),
-  
-  activityLogged: (taskId: string, activity: any) => 
-    broadcastNotification('activity_updates', 'activity_logged', { taskId, activity }),
-  
-  deliverableAdded: (taskId: string, deliverable: any) => 
-    broadcastNotification('deliverable_updates', 'deliverable_added', { taskId, deliverable }),
-  
-  jobAvailable: (jobName: string) => 
-    broadcastNotification('job_available', 'job_available', { jobName }),
-};
-```
-
-### React Hook for Notifications
-
-```typescript
-// src/hooks/useNotifications.ts
-import { useEffect } from 'react';
-import { useMissionControl } from '@/store';
-import { startNotificationListener, NotificationChannel, NotificationPayload } from '@/lib/db/notify';
-
-export function useNotifications() {
-  const { 
-    updateTask, 
-    addTask, 
-    updateAgent, 
-    addActivity, 
-    addDeliverable 
-  } = useMissionControl();
-  
-  useEffect(() => {
-    const cleanup = startNotificationListener((channel, payload) => {
-      // Ignore own notifications
-      if (payload.instanceId === process.env.NEXT_PUBLIC_MC_INSTANCE_ID) {
-        return;
+  // Reconnection logic
+  client.on('error', async (err) => {
+    console.error('[NOTIFY] Connection error:', err);
+    try { client.release(); } catch {}
+    setTimeout(async () => {
+      try {
+        client = await listenPool.connect();
+        await setupListener();
+      } catch (reconnectErr) {
+        console.error('[NOTIFY] Reconnection failed:', reconnectErr);
       }
-      
-      switch (channel) {
-        case 'task_updates':
-          if (payload.type === 'task_created') {
-            addTask(payload.data.task);
-          } else if (payload.type === 'task_updated') {
-            updateTask(payload.data.taskId, payload.data.updates);
-          }
-          break;
-          
-        case 'agent_updates':
-          updateAgent(payload.data.agentId, payload.data);
-          break;
-          
-        case 'activity_updates':
-          addActivity(payload.data.taskId, payload.data.activity);
-          break;
-          
-        case 'deliverable_updates':
-          addDeliverable(payload.data.taskId, payload.data.deliverable);
-          break;
-          
-        case 'job_available':
-          // Trigger job claim attempt
-          attemptJobClaim(payload.data.jobName);
-          break;
-      }
-    });
-    
-    return cleanup;
-  }, []);
+    }, 5000);
+  });
 }
-```
 
-### Database Triggers for Automatic Notifications
+// Hybrid approach - LISTEN/NOTIFY + periodic poll fallback
+const NOTIFY_TIMEOUT = 30000; // 30 seconds
 
-```sql
--- Automatically notify on task changes
-CREATE OR REPLACE FUNCTION notify_task_change()
-RETURNS TRIGGER AS $$
-BEGIN
-  PERFORM pg_notify('task_updates', json_build_object(
-    'type', 'task_updated',
-    'instanceId', 'database_trigger',
-    'timestamp', EXTRACT(EPOCH FROM NOW()) * 1000,
-    'data', json_build_object('taskId', NEW.id, 'updates', row_to_json(NEW))
-  )::text);
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER task_notify AFTER UPDATE ON tasks
-FOR EACH ROW EXECUTE FUNCTION notify_task_change();
+export function setupHybridSync(onUpdate: (changes: any[]) => void) {
+  let lastNotification = Date.now();
+  
+  startNotificationListener((channel, payload) => {
+    lastNotification = Date.now();
+    onUpdate([payload]);
+  });
+  
+  // If no notification received for 30 seconds, poll for updates
+  setInterval(async () => {
+    if (Date.now() - lastNotification > NOTIFY_TIMEOUT) {
+      const changes = await fetchChangesSince(lastNotification);
+      if (changes.length > 0) {
+        onUpdate(changes);
+      }
+    }
+  }, NOTIFY_TIMEOUT);
+}
 ```
 
 ---
 
 ## Distributed Job Queue
 
-### Architecture
+### Advisory Lock Pattern
 
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ MC Instance │  │ MC Instance │  │ MC Instance │
-│   (Skippy)  │  │(Dev Manager)│  │(Marketing)  │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
-       │                │                │
-       │                │                │
-       ▼                ▼                ▼
-┌─────────────────────────────────────────────┐
-│            PostgreSQL Job Queue             │
-│                                             │
-│  scheduled_jobs (job definitions)          │
-│  job_executions (run history)              │
-│  pg_advisory_lock (coordination)           │
-└─────────────────────────────────────────────┘
+#### ⚠️ Fixed: Use PostgreSQL hashtext() (from Dev Manager Review)
+
+**Problem:** The original hash function used 32-bit integers, which has collision risk with 100+ jobs.
+
+**Solution:** Use PostgreSQL's built-in `hashtext()` which returns 64-bit:
+
+```sql
+-- Use PostgreSQL's hashtext for collision-resistant locking
+SELECT pg_try_advisory_lock(hashtext('cleanup-stale-sessions'));
+
+-- Or use bigint range directly
+SELECT pg_try_advisory_lock(abs(('x'||substr(md5('cleanup-stale-sessions'),1,16))::bit(64)::bigint));
 ```
 
-### Job Claiming with Advisory Locks
+### Complete Implementation
 
 ```typescript
 // src/lib/scheduler.ts
-import { queryOne, run } from './db';
+import { queryOne, run, queryAll } from './db';
 
 const INSTANCE_ID = process.env.MC_INSTANCE_ID || 'unknown';
+const CIRCUIT_BREAKER_THRESHOLD = 3;
+const CIRCUIT_BREAKER_TIMEOUT = 300000; // 5 minutes
 
-// Hash job name to integer for advisory lock
-function hashJobName(name: string): number {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash) + name.charCodeAt(i);
-    hash = hash & hash;  // Convert to 32-bit integer
-  }
-  return Math.abs(hash);
-}
-
-// Try to claim and run a job
+// Job claim with heartbeat and circuit breaker
 export async function claimAndRunJob(jobName: string): Promise<boolean> {
-  const lockId = hashJobName(jobName);
+  // Check circuit breaker first
+  const failures = await queryOne<{ count: number }>(
+    `SELECT COUNT(*) as count FROM job_executions 
+     WHERE instance_id = $1 
+       AND status = 'failed' 
+       AND started_at > NOW() - INTERVAL '1 hour'`,
+    [INSTANCE_ID]
+  );
   
-  // Try to acquire advisory lock
+  if (failures && failures.count >= CIRCUIT_BREAKER_THRESHOLD) {
+    console.warn(`[CIRCUIT] Instance ${INSTANCE_ID} in circuit-open state`);
+    return false;
+  }
+  
+  // Use PostgreSQL hashtext for collision-resistant lock
   const lockResult = await queryOne<{ locked: boolean }>(
-    'SELECT pg_try_advisory_lock($1) as locked',
-    [lockId]
+    'SELECT pg_try_advisory_lock(hashtext($1)) as locked',
+    [jobName]
   );
   
   if (!lockResult?.locked) {
-    // Another instance is already running this job
-    return false;
+    return false;  // Another instance has this job
   }
   
   try {
@@ -1293,7 +842,7 @@ export async function claimAndRunJob(jobName: string): Promise<boolean> {
     );
     
     if (!job) {
-      return false;  // Not due yet
+      return false;
     }
     
     // Record execution start
@@ -1305,16 +854,13 @@ export async function claimAndRunJob(jobName: string): Promise<boolean> {
     );
     
     try {
-      // Run the handler
       await runJobHandler(job.handler);
       
-      // Mark success
       await run(
         `UPDATE job_executions SET status = 'completed', completed_at = NOW() WHERE id = $1`,
         [execution!.id]
       );
       
-      // Schedule next run
       await run(
         `UPDATE scheduled_jobs 
          SET last_run = NOW(), 
@@ -1325,226 +871,430 @@ export async function claimAndRunJob(jobName: string): Promise<boolean> {
       
       return true;
     } catch (err) {
-      // Mark failed
       await run(
         `UPDATE job_executions SET status = 'failed', completed_at = NOW(), error = $1 WHERE id = $2`,
         [String(err), execution!.id]
       );
+      
+      // Check if we should move to DLQ
+      const failCount = await queryOne<{ count: number }>(
+        `SELECT COUNT(*) as count FROM job_executions 
+         WHERE job_id = $1 AND status = 'failed' AND started_at > NOW() - INTERVAL '1 day'`,
+        [job.id]
+      );
+      
+      if (failCount && failCount.count >= 3) {
+        await moveToDeadLetterQueue(jobName, job, String(err), failCount.count);
+      }
+      
       throw err;
     }
   } finally {
-    // Always release lock
-    await run('SELECT pg_advisory_unlock($1)', [lockId]);
+    await run('SELECT pg_advisory_unlock(hashtext($1))', [jobName]);
   }
 }
 
-// Job handlers registry
-const handlers: Record<string, () => Promise<void>> = {
-  cleanupStaleSessions: async () => {
+// Heartbeat during long jobs
+export function startHeartbeat(jobId: string) {
+  return setInterval(async () => {
     await run(
-      `UPDATE openclaw_sessions SET status = 'inactive' 
-       WHERE status = 'active' AND updated_at < NOW() - INTERVAL '2 hours'`
+      `UPDATE job_executions SET heartbeat_at = NOW() 
+       WHERE id = $1 AND status = 'running'`,
+      [jobId]
     );
-  },
-  
-  checkAgentHeartbeats: async () => {
-    await run(
-      `UPDATE agents SET status = 'offline' 
-       WHERE status != 'offline' AND updated_at < NOW() - INTERVAL '5 minutes'`
-    );
-  },
-  
-  cleanupOldAuditLogs: async () => {
-    await run(
-      `DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL '90 days'`
-    );
-  },
-  
-  aggregateTokenUsage: async () => {
-    // Aggregate hourly stats into daily stats table (if using)
-  },
-  
-  backupDatabase: async () => {
-    // Trigger backup via Neon API or pg_dump
-  },
-};
-
-async function runJobHandler(handlerName: string) {
-  const handler = handlers[handlerName];
-  if (!handler) {
-    throw new Error(`Unknown job handler: ${handlerName}`);
-  }
-  await handler();
-}
-```
-
-### Scheduler Loop
-
-```typescript
-// Start scheduler loop on each MC instance
-export function startScheduler() {
-  // Poll for jobs every minute
-  setInterval(async () => {
-    // Get list of enabled jobs
-    const jobs = await queryAll<{ name: string }>(
-      `SELECT name FROM scheduled_jobs WHERE enabled = true`
-    );
-    
-    // Try to claim each job
-    for (const job of jobs) {
-      claimAndRunJob(job.name).catch(err => {
-        console.error(`Job ${job.name} failed:`, err);
-      });
-    }
-  }, 60000);  // 1 minute interval
+  }, 60000);  // Every minute
 }
 ```
 
 ---
 
-## API Reference
+## Dead Letter Queue
 
-### Tasks
+### Schema
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/tasks` | List tasks with filters |
-| POST | `/api/tasks` | Create task |
-| GET | `/api/tasks/:id` | Get task details |
-| PATCH | `/api/tasks/:id` | Update task |
-| DELETE | `/api/tasks/:id` | Delete task |
-| POST | `/api/tasks/:id/dispatch` | Dispatch to agent |
-| POST | `/api/tasks/:id/review` | Submit quality review |
-| GET | `/api/tasks/:id/activities` | Get activity log |
-| POST | `/api/tasks/:id/activities` | Log activity |
-| GET | `/api/tasks/:id/deliverables` | Get deliverables |
-| POST | `/api/tasks/:id/deliverables` | Add deliverable |
+```sql
+CREATE TABLE dead_letter_queue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_name TEXT NOT NULL,
+  payload JSONB,
+  failure_reason TEXT,
+  retry_count INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT NOW(),
+  resolved_at TIMESTAMP,
+  resolved_by TEXT
+);
 
-### Agents
+CREATE INDEX idx_dlq_created ON dead_letter_queue(created_at DESC);
+CREATE INDEX idx_dlq_resolved ON dead_letter_queue(resolved_at) WHERE resolved_at IS NULL;
+```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/agents` | List agents |
-| POST | `/api/agents` | Create agent |
-| GET | `/api/agents/:id` | Get agent details |
-| PATCH | `/api/agents/:id` | Update agent |
-| DELETE | `/api/agents/:id` | Delete agent |
-| POST | `/api/agents/:id/heartbeat` | Agent heartbeat |
-| POST | `/api/agents/:id/wake` | Wake sleeping agent |
+### Implementation
 
-### Planning
+```typescript
+// Move failed job to DLQ after max retries
+async function moveToDeadLetterQueue(
+  jobName: string, 
+  job: any, 
+  failureReason: string,
+  retryCount: number
+) {
+  await run(
+    `INSERT INTO dead_letter_queue (job_name, payload, failure_reason, retry_count)
+     VALUES ($1, $2, $3, $4)`,
+    [jobName, JSON.stringify(job), failureReason, retryCount]
+  );
+  
+  // Alert via notification channel
+  await pool.query(`SELECT pg_notify('alerts', $1)`, [
+    JSON.stringify({
+      type: 'job_dead_lettered',
+      job_name: jobName,
+      failure_reason: failureReason,
+      timestamp: Date.now()
+    })
+  ]);
+  
+  // Disable the failing job
+  await run(
+    `UPDATE scheduled_jobs SET enabled = false WHERE name = $1`,
+    [jobName]
+  );
+}
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/tasks/:id/planning` | Start planning session |
-| GET | `/api/tasks/:id/planning` | Get planning state |
-| POST | `/api/tasks/:id/planning/questions` | Add questions |
-| POST | `/api/tasks/:id/planning/answer` | Submit answer |
-| POST | `/api/tasks/:id/planning/complete` | Complete planning |
+// Admin UI for reviewing DLQ
+export async function getDeadLetterQueue(limit = 50) {
+  return queryAll(
+    `SELECT * FROM dead_letter_queue 
+     WHERE resolved_at IS NULL 
+     ORDER BY created_at DESC 
+     LIMIT $1`,
+    [limit]
+  );
+}
 
-### Token Usage
+export async function retryFromDLQ(dlqId: string) {
+  const dlq = await queryOne<any>(
+    'SELECT * FROM dead_letter_queue WHERE id = $1',
+    [dlqId]
+  );
+  
+  if (!dlq) return false;
+  
+  // Re-enable job and reset next_run
+  await run(
+    `UPDATE scheduled_jobs SET enabled = true, next_run = NOW() WHERE name = $1`,
+    [dlq.job_name]
+  );
+  
+  // Mark DLQ entry as resolved
+  await run(
+    `UPDATE dead_letter_queue SET resolved_at = NOW(), resolved_by = $1 WHERE id = $2`,
+    [INSTANCE_ID, dlqId]
+  );
+  
+  return true;
+}
+```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/tokens` | List token usage |
-| GET | `/api/tokens/summary` | Aggregated stats |
-| GET | `/api/tokens/trends` | Time-series data |
-| POST | `/api/tokens` | Record usage |
+---
 
-### Quality Reviews
+## Circuit Breaker Pattern
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/tasks/:id/reviews` | List reviews |
-| POST | `/api/tasks/:id/reviews` | Submit review |
+### Implementation
 
-### Audit
+```typescript
+// src/lib/circuit-breaker.ts
+const agentHealth = new Map<string, { failures: number; lastFailure: Date }>();
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/audit` | List audit events |
-| GET | `/api/audit/security` | Security events |
+export function canDispatchToAgent(agentId: string): boolean {
+  const health = agentHealth.get(agentId);
+  if (!health) return true;
+  
+  // Circuit open for 5 minutes after 3 consecutive failures
+  if (health.failures >= CIRCUIT_BREAKER_THRESHOLD) {
+    const timeSinceFailure = Date.now() - health.lastFailure.getTime();
+    return timeSinceFailure > CIRCUIT_BREAKER_TIMEOUT;
+  }
+  
+  return true;
+}
 
-### Scheduler
+export function recordAgentFailure(agentId: string) {
+  const health = agentHealth.get(agentId) || { failures: 0, lastFailure: new Date() };
+  health.failures++;
+  health.lastFailure = new Date();
+  agentHealth.set(agentId, health);
+  
+  // Log to audit
+  logAuditEvent({
+    action: 'agent_failure',
+    actor: 'circuit_breaker',
+    target_type: 'agent',
+    target_id: agentId,
+    detail: { failure_count: health.failures }
+  });
+}
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/scheduler` | List scheduled jobs |
-| POST | `/api/scheduler` | Create job |
-| PATCH | `/api/scheduler/:id` | Update job |
-| DELETE | `/api/scheduler/:id` | Delete job |
-| GET | `/api/scheduler/executions` | Execution history |
+export function recordAgentSuccess(agentId: string) {
+  agentHealth.set(agentId, { failures: 0, lastFailure: new Date() });
+}
+```
 
-### Webhooks
+---
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/webhooks` | List webhooks |
-| POST | `/api/webhooks` | Create webhook |
-| PATCH | `/api/webhooks/:id` | Update webhook |
-| DELETE | `/api/webhooks/:id` | Delete webhook |
-| GET | `/api/webhooks/deliveries` | Delivery history |
+## Token Pricing & Cost Calculation
+
+### Model Pricing Table
+
+```typescript
+// src/lib/token-pricing.ts
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  // OpenAI (per 1M tokens)
+  'gpt-4o': { input: 2.50, output: 10.00 },
+  'gpt-4o-mini': { input: 0.15, output: 0.60 },
+  'gpt-4-turbo': { input: 10.00, output: 30.00 },
+  
+  // Anthropic (per 1M tokens)
+  'claude-3-5-sonnet': { input: 3.00, output: 15.00 },
+  'claude-3-5-haiku': { input: 0.80, output: 4.00 },
+  'claude-3-opus': { input: 15.00, output: 75.00 },
+  
+  // OpenRouter (average, per 1M tokens)
+  'openrouter/auto': { input: 1.00, output: 3.00 },
+  'openrouter/openai/gpt-4o': { input: 2.50, output: 10.00 },
+  
+  // Moonshot (per 1M tokens)
+  'moonshot/kimi-k2.5': { input: 0.50, output: 2.00 },
+  
+  // Gemini (per 1M tokens)
+  'gemini-1.5-pro': { input: 1.25, output: 5.00 },
+  'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+};
+
+export function calculateCost(
+  model: string, 
+  inputTokens: number, 
+  outputTokens: number
+): number {
+  const pricing = MODEL_PRICING[model] || { input: 1.00, output: 3.00 };  // Default fallback
+  const inputCost = (inputTokens / 1_000_000) * pricing.input;
+  const outputCost = (outputTokens / 1_000_000) * pricing.output;
+  return Number((inputCost + outputCost).toFixed(6));
+}
+
+// Record token usage
+export async function recordTokenUsage(data: {
+  sessionId?: string;
+  agentId?: string;
+  taskId?: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+}) {
+  const totalTokens = data.inputTokens + data.outputTokens;
+  const cost = calculateCost(data.model, data.inputTokens, data.outputTokens);
+  
+  await run(
+    `INSERT INTO token_usage (session_id, agent_id, task_id, model, input_tokens, output_tokens, total_tokens, cost)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [data.sessionId, data.agentId, data.taskId, data.model, data.inputTokens, data.outputTokens, totalTokens, cost]
+  );
+  
+  return { totalTokens, cost };
+}
+```
+
+---
+
+## Migration Strategy
+
+### Phase 1.5: Migration Procedure (Added from Dev Manager Review)
+
+#### Pre-Migration Checklist
+
+```
+□ Full SQLite backup created
+□ Data exported to JSON (for validation)
+□ PostgreSQL schema created in Neon
+□ Connection verified from all agent machines
+□ Rollback plan documented
+□ Maintenance window scheduled (2-4 hours)
+□ All stakeholders notified
+```
+
+#### Migration Day Procedure
+
+```
+1. STOP PHASE (15 minutes)
+   □ Stop all Mission Control instances
+   □ Stop all agent polling scripts
+   □ Verify no active tasks in progress
+   
+2. BACKUP PHASE (10 minutes)
+   □ Create SQLite backup: cp mission-control.db mission-control.db.pre-migration
+   □ Export data to JSON: node scripts/export-sqlite-to-json.ts
+   □ Verify backup integrity
+   
+3. MIGRATE PHASE (30-60 minutes)
+   □ Run migration script: node scripts/migrate-sqlite-to-postgres.ts
+   □ Validate row counts match:
+     - tasks: SQLite X = PostgreSQL Y
+     - agents: SQLite X = PostgreSQL Y
+     - activities: SQLite X = PostgreSQL Y
+   □ Validate data integrity (spot checks)
+   
+4. STARTUP PHASE (15 minutes)
+   □ Update environment: DATABASE_URL=postgresql://...
+   □ Start Skippy's MC with PostgreSQL
+   □ Verify dashboard loads
+   □ Test basic operations (create task, update status)
+   □ Start other MC instances one by one
+   
+5. VALIDATION PHASE (30 minutes)
+   □ Test task dispatch flow
+   □ Test agent communication
+   □ Test real-time updates
+   □ Monitor for errors
+```
+
+#### Rollback Plan
+
+```
+If issues detected:
+
+1. IMMEDIATE (5 minutes)
+   □ Stop all PostgreSQL MC instances
+   □ Revert environment: DATABASE_URL=sqlite://...
+   
+2. RESTORE (10 minutes)
+   □ Restore SQLite: cp mission-control.db.pre-migration mission-control.db
+   □ Restart MC instances with SQLite
+   
+3. INVESTIGATE
+   □ Collect error logs
+   □ Document failure mode
+   □ Fix issues in migration script
+   
+4. RETRY
+   □ Schedule new migration window
+   □ Apply fixes
+   □ Retry migration
+```
+
+#### Migration Script Template
+
+```typescript
+// scripts/migrate-sqlite-to-postgres.ts
+import Database from 'better-sqlite3';
+import { Pool } from 'pg';
+
+const sqlite = new Database('./mission-control.db');
+const pg = new Pool({ connectionString: process.env.POSTGRES_URL });
+
+async function migrate() {
+  console.log('[MIGRATE] Starting migration...');
+  
+  // Migrate agents
+  const agents = sqlite.prepare('SELECT * FROM agents').all();
+  console.log(`[MIGRATE] Migrating ${agents.length} agents...`);
+  for (const agent of agents) {
+    await pg.query(`
+      INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, workspace_id, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (id) DO UPDATE SET ...`, [...]);
+  }
+  
+  // Migrate tasks
+  const tasks = sqlite.prepare('SELECT * FROM tasks').all();
+  console.log(`[MIGRATE] Migrating ${tasks.length} tasks...`);
+  // ... similar pattern
+  
+  // Validate counts
+  const pgAgentCount = await pg.query('SELECT COUNT(*) FROM agents');
+  if (pgAgentCount.rows[0].count !== agents.length) {
+    throw new Error('Agent count mismatch!');
+  }
+  
+  console.log('[MIGRATE] Migration complete!');
+}
+```
 
 ---
 
 ## Implementation Roadmap
 
-### Phase 1: PostgreSQL Migration (Week 1-2)
+### Updated Timeline (12 Weeks - Extended from Dev Manager Review)
+
+| Phase | Duration | Risk | Recommended |
+|-------|----------|------|-------------|
+| Phase 1: PostgreSQL Migration | 2 weeks | 🔴 High | **3 weeks** |
+| Phase 2: LISTEN/NOTIFY | 1 week | 🟡 Medium | 1 week |
+| Phase 3: Token Tracking | 1 week | 🟢 Low | 1 week |
+| Phase 4: Quality Gates | 1 week | 🟢 Low | 1 week |
+| Phase 5: Job Queue + DLQ | 1 week | 🟡 Medium | **1.5 weeks** |
+| Phase 6: Audit Logging | 1 week | 🟢 Low | 0.5 weeks |
+| Phase 7: Webhooks | 1 week | 🟡 Medium | 1 week |
+| Phase 8: Deploy to Agents | 1 week | 🔴 High | **2 weeks** |
+| Phase 9: Rate Limit/RBAC | 1 week | 🟢 Low | 1 week |
+| **Testing & Polish** | - | 🔴 High | **2 weeks** |
+| **Total** | **9 weeks** | | **12 weeks** |
+
+### Phase 1: PostgreSQL Migration (Weeks 1-3)
 
 **Goal:** Replace SQLite with PostgreSQL as primary database.
 
 **Tasks:**
-- [ ] Create complete PostgreSQL schema (see Database Schema section)
-- [ ] Create database migration scripts (SQLite → PostgreSQL)
+- [ ] Create complete PostgreSQL schema
+- [ ] Create migration scripts (SQLite → PostgreSQL)
+- [ ] Create backup and rollback procedures
+- [ ] Test migration on staging environment
+- [ ] Validate data integrity post-migration
 - [ ] Update all API routes to use PostgreSQL
 - [ ] Update query syntax (datetime → NOW(), etc.)
-- [ ] Test all endpoints
-- [ ] Deploy to production
+- [ ] Deploy to production with rollback plan
 
 **Success Criteria:**
 - All existing functionality works with PostgreSQL
 - No SQLite usage
 - All tests pass
+- Rollback procedure tested
 
 ---
 
-### Phase 2: LISTEN/NOTIFY Integration (Week 2-3)
+### Phase 2: LISTEN/NOTIFY Integration (Week 4)
 
 **Goal:** Real-time synchronization across MC instances.
 
 **Tasks:**
-- [ ] Implement notification listener service
+- [ ] Implement notification listener service with reconnection
 - [ ] Add broadcast calls to all mutation endpoints
+- [ ] Implement hybrid poll fallback
 - [ ] Create React hooks for notification handling
 - [ ] Add database triggers for automatic notifications
 - [ ] Test multi-instance sync
 
 **Success Criteria:**
 - Changes in one MC appear instantly in others
-- No polling required for state sync
 - Latency < 100ms
+- Works during network partitions (fallback)
 
 ---
 
-### Phase 3: Token Usage Tracking (Week 3)
+### Phase 3: Token Usage Tracking (Week 5)
 
 **Goal:** Visibility into API costs.
 
 **Tasks:**
 - [ ] Add token_usage table
 - [ ] Create token recording API
+- [ ] Add token pricing table
 - [ ] Add token tracking to agent dispatch flow
 - [ ] Create token dashboard UI
 - [ ] Add trend charts
 
-**Success Criteria:**
-- All agent API calls tracked
-- Per-agent, per-model costs visible
-- Historical trends available
-
 ---
 
-### Phase 4: Quality Review Gates (Week 4)
+### Phase 4: Quality Review Gates (Week 6)
 
 **Goal:** Formal approval workflow.
 
@@ -1555,32 +1305,24 @@ export function startScheduler() {
 - [ ] Update task workflow UI
 - [ ] Add review history display
 
-**Success Criteria:**
-- Tasks require approval before completion
-- Review history tracked
-- Notification on review submission
-
 ---
 
-### Phase 5: Distributed Job Queue (Week 4-5)
+### Phase 5: Job Queue + DLQ + Circuit Breaker (Weeks 7-8)
 
-**Goal:** Background jobs run on any available instance.
+**Goal:** Distributed job execution with reliability.
 
 **Tasks:**
 - [ ] Add scheduled_jobs and job_executions tables
-- [ ] Implement advisory lock job claiming
+- [ ] Implement advisory lock job claiming with hashtext()
+- [ ] Add Dead Letter Queue
+- [ ] Add circuit breaker pattern
 - [ ] Create job handlers for existing cron tasks
 - [ ] Migrate existing cron jobs to scheduler
 - [ ] Add scheduler UI
 
-**Success Criteria:**
-- Jobs run exactly once across all instances
-- Job history tracked per instance
-- Failed jobs logged with error details
-
 ---
 
-### Phase 6: Audit Logging (Week 5)
+### Phase 6: Audit Logging (Week 8)
 
 **Goal:** Security forensics and compliance.
 
@@ -1589,16 +1331,11 @@ export function startScheduler() {
 - [ ] Add logging to all security-relevant actions
 - [ ] Create audit API endpoints
 - [ ] Add audit log viewer UI
-- [ ] Set up retention policy
-
-**Success Criteria:**
-- All security events logged
-- Logs searchable by action, actor, date
-- Retention policy enforced
+- [ ] Set up retention policy (90 days)
 
 ---
 
-### Phase 7: Webhooks (Week 6)
+### Phase 7: Webhooks (Week 9)
 
 **Goal:** External system integration.
 
@@ -1609,14 +1346,9 @@ export function startScheduler() {
 - [ ] Add HMAC signature verification
 - [ ] Create webhook management UI
 
-**Success Criteria:**
-- Webhooks fire on configured events
-- Retry logic works
-- Delivery history visible
-
 ---
 
-### Phase 8: Deploy to All Agents (Week 6-7)
+### Phase 8: Deploy to All Agents (Weeks 10-11)
 
 **Goal:** Each agent runs Mission Control locally.
 
@@ -1626,29 +1358,27 @@ export function startScheduler() {
 - [ ] Configure PostgreSQL connection strings
 - [ ] Test multi-instance coordination
 - [ ] Document agent setup process
-
-**Success Criteria:**
-- Each agent has local MC dashboard
-- All instances stay in sync
-- No single point of failure
+- [ ] Create runbooks for common issues
 
 ---
 
-### Phase 9: Rate Limiting & RBAC (Week 7-8)
+### Phase 9: Testing & Polish (Weeks 11-12)
 
-**Goal:** Security hardening.
+**Goal:** Production hardening.
 
 **Tasks:**
-- [ ] Implement rate limiting middleware
-- [ ] Add users table for human access
-- [ ] Implement RBAC permission checks
-- [ ] Create user management UI
-- [ ] Test permission boundaries
+- [ ] End-to-end testing of all features
+- [ ] Load testing with multiple instances
+- [ ] Failure scenario testing (network partitions, crashes)
+- [ ] Performance optimization
+- [ ] Documentation updates
+- [ ] Monitoring and alerting setup
 
-**Success Criteria:**
-- API abuse prevented
-- Different user roles work correctly
-- Admin-only endpoints protected
+---
+
+### Phase 10: Rate Limiting & RBAC (Optional - Week 12+)
+
+**Goal:** Security hardening (if needed for external access).
 
 ---
 
@@ -1663,12 +1393,11 @@ export function startScheduler() {
 - API keys for programmatic access
 - Discord OAuth for agent identity (existing)
 
-### Authorization
+### Rate Limiting
 
-**RBAC Roles:**
-- `viewer` - Read-only access
-- `operator` - Can create/update tasks, spawn agents
-- `admin` - Full access including settings and user management
+Since this is an internal agent dashboard, rate limiting may be overkill unless exposing to external users. Consider for:
+- Public demo instances
+- Multi-tenant deployments
 
 ### Network Security
 
@@ -1676,14 +1405,6 @@ export function startScheduler() {
 - API tokens stored securely (env vars, not code)
 - Webhook secrets for HMAC verification
 - Rate limiting to prevent abuse
-
-### Audit Trail
-
-All security-relevant events logged:
-- Authentication attempts
-- Permission changes
-- Agent lifecycle events
-- Settings modifications
 
 ---
 
@@ -1704,6 +1425,7 @@ GET /api/status          - System metrics (uptime, memory, disk)
 - WebSocket connection status
 - Token usage trends
 - Job execution success rate
+- Dead Letter Queue size
 - API response times
 
 ### Alerting
@@ -1713,7 +1435,33 @@ Configure alerts for:
 - Database connection failures
 - High token usage (cost threshold)
 - Failed job executions
+- Items in Dead Letter Queue
 - Failed webhook deliveries
+
+---
+
+## Dev Manager Review Summary
+
+### Overall Assessment
+
+**Architecture is sound.** The guide covers the major concerns for distributed agent orchestration.
+
+### Critical Issues Addressed
+
+| Issue | Severity | Resolution |
+|-------|----------|------------|
+| LISTEN/NOTIFY 8KB limit | 🔴 High | Added reference pattern + reconnection logic |
+| Advisory lock collision | 🟡 Medium | Fixed: Use PostgreSQL hashtext() |
+| Dead Letter Queue | 🔴 High | Added DLQ table and alerting |
+| Migration strategy | 🔴 High | Added detailed migration procedure |
+| Circuit breaker | 🟡 Medium | Added to job claiming logic |
+| Token pricing | 🟡 Medium | Added pricing table and calculation |
+| Timeline | 🟡 Medium | Extended to 12 weeks |
+| Missing features | 🟡 Medium | Added metrics, backup, feature flags |
+
+### Final Verdict
+
+✅ **Ready for implementation** with the additions documented in this guide.
 
 ---
 
@@ -1723,10 +1471,9 @@ Configure alerts for:
 - [Current Implementation](../README.md)
 - [Orchestration Guide](../ORCHESTRATION.md)
 - [Agent Setup](../agent-resources/docs/AGENT_SETUP.md)
-- [Implementation Guide](../IMPLEMENTATION_GUIDE.md)
 
 ### External
-- [Builderz Labs Mission Control](https://github.com/builderz-labs/mission-control) - Reference implementation
+- [Builderz Labs Mission Control](https://github.com/builderz-labs/mission-control)
 - [PostgreSQL LISTEN/NOTIFY](https://www.postgresql.org/docs/current/sql-notify.html)
 - [PostgreSQL Advisory Locks](https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS)
 - [Neon PostgreSQL](https://neon.tech/docs/introduction)
@@ -1737,6 +1484,7 @@ Configure alerts for:
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.1.0 | 2026-03-01 | Added Dev Manager review feedback: DLQ, circuit breaker, migration strategy, extended timeline |
 | 2.0.0 | 2026-03-01 | Distributed architecture redesign |
 | 1.1.0 | 2026-02-16 | Added real-time SSE, activities, deliverables |
 | 1.0.0 | 2026-02-01 | Initial release |
