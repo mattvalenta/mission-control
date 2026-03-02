@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
-import { broadcast } from '@/lib/events';
+import { notifyBoth } from '@/lib/db/notify-wrapper';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
 import type { Task, UpdateTaskRequest, Agent } from '@/lib/types';
@@ -13,16 +13,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = await queryOne<Task>(
-      `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji
-       FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = $1`,
-      [id]
-    );
-
-    if (!task) {
-      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-    }
-
+    const task = await queryOne<Task>(`SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id WHERE t.id = $1`, [id]);
+    if (!task) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     return NextResponse.json(task);
   } catch (error) {
     console.error('Failed to fetch task:', error);
@@ -40,15 +32,11 @@ export async function PATCH(
     const body: UpdateTaskRequest & { updated_by_agent_id?: string } = await request.json();
 
     const validation = UpdateTaskSchema.safeParse(body);
-    if (!validation.success) {
-      return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
-    }
+    if (!validation.success) return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
 
     const validatedData = validation.data;
     const existing = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [id]);
-    if (!existing) {
-      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-    }
+    if (!existing) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
 
     const updates: string[] = [];
     const values: unknown[] = [];
@@ -56,9 +44,7 @@ export async function PATCH(
 
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
       const updatingAgent = await queryOne<Agent>('SELECT is_master FROM agents WHERE id = $1', [validatedData.updated_by_agent_id]);
-      if (!updatingAgent || !updatingAgent.is_master) {
-        return NextResponse.json({ error: 'Forbidden: only the master agent can approve tasks' }, { status: 403 });
-      }
+      if (!updatingAgent || !updatingAgent.is_master) return NextResponse.json({ error: 'Forbidden: only the master agent can approve tasks' }, { status: 403 });
     }
 
     if (validatedData.title !== undefined) { updates.push(`title = $${paramIndex++}`); values.push(validatedData.title); }
@@ -73,8 +59,7 @@ export async function PATCH(
       values.push(validatedData.status);
       if (validatedData.status === 'assigned' && existing.assigned_agent_id) shouldDispatch = true;
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
-      await run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`,
-        [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`]);
+      await run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`, [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`]);
     }
 
     if (validatedData.assigned_agent_id !== undefined && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
@@ -83,8 +68,7 @@ export async function PATCH(
       if (validatedData.assigned_agent_id) {
         const agent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.assigned_agent_id]);
         if (agent) {
-          await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
-            [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`]);
+          await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`]);
           if (existing.status === 'assigned' || validatedData.status === 'assigned') shouldDispatch = true;
         }
       }
@@ -97,12 +81,12 @@ export async function PATCH(
 
     await run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = $${paramIndex}`, values);
 
-    const task = await queryOne<Task>(
-      `SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name
-       FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE t.id = $1`,
-      [id]);
+    const task = await queryOne<Task>(`SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE t.id = $1`, [id]);
 
-    if (task) broadcast({ type: 'task_updated', payload: task });
+    // Broadcast task update via SSE + PostgreSQL NOTIFY
+    if (task) {
+      await notifyBoth('task_updates', 'task_updated', { taskId: task.id, task });
+    }
 
     if (shouldDispatch) {
       fetch(`${getMissionControlUrl()}/api/tasks/${id}/dispatch`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(console.error);
@@ -130,7 +114,9 @@ export async function DELETE(
     await run('UPDATE conversations SET task_id = NULL WHERE task_id = $1', [id]);
     await run('DELETE FROM tasks WHERE id = $1', [id]);
 
-    broadcast({ type: 'task_deleted', payload: { id } });
+    // Broadcast task deletion via SSE + PostgreSQL NOTIFY
+    await notifyBoth('task_updates', 'task_deleted', { taskId: id });
+
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Failed to delete task:', error);

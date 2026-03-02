@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryOne, run } from '@/lib/db';
+import { notifyBoth } from '@/lib/db/notify-wrapper';
 import type { Agent, UpdateAgentRequest } from '@/lib/types';
 
 // GET /api/agents/[id] - Get a single agent
@@ -34,6 +35,8 @@ export async function PATCH(
     const updates: string[] = [];
     const values: unknown[] = [];
     let paramIndex = 1;
+    let statusChanged = false;
+    let newStatus: string | undefined;
 
     if (body.name !== undefined) { updates.push(`name = $${paramIndex++}`); values.push(body.name); }
     if (body.role !== undefined) { updates.push(`role = $${paramIndex++}`); values.push(body.role); }
@@ -42,8 +45,9 @@ export async function PATCH(
     if (body.status !== undefined) {
       updates.push(`status = $${paramIndex++}`);
       values.push(body.status);
-      await run(`INSERT INTO events (id, type, agent_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`,
-        [uuidv4(), 'agent_status_changed', id, `${existing.name} is now ${body.status}`]);
+      statusChanged = true;
+      newStatus = body.status;
+      await run(`INSERT INTO events (id, type, agent_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`, [uuidv4(), 'agent_status_changed', id, `${existing.name} is now ${body.status}`]);
     }
     if (body.is_master !== undefined) { updates.push(`is_master = $${paramIndex++}`); values.push(body.is_master); }
     if (body.soul_md !== undefined) { updates.push(`soul_md = $${paramIndex++}`); values.push(body.soul_md); }
@@ -59,6 +63,12 @@ export async function PATCH(
     await run(`UPDATE agents SET ${updates.join(', ')} WHERE id = $${paramIndex}`, values);
 
     const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
+
+    // Broadcast agent update via SSE + PostgreSQL NOTIFY
+    if (agent) {
+      await notifyBoth('agent_updates', 'agent_updated', { agentId: agent.id, agent, statusChanged, newStatus });
+    }
+
     return NextResponse.json(agent);
   } catch (error) {
     console.error('Failed to update agent:', error);
@@ -84,6 +94,9 @@ export async function DELETE(
     await run('UPDATE tasks SET created_by_agent_id = NULL WHERE created_by_agent_id = $1', [id]);
     await run('UPDATE task_activities SET agent_id = NULL WHERE agent_id = $1', [id]);
     await run('DELETE FROM agents WHERE id = $1', [id]);
+
+    // Broadcast agent deletion via SSE + PostgreSQL NOTIFY
+    await notifyBoth('agent_updates', 'agent_deleted', { agentId: id, agentName: existing.name });
 
     return NextResponse.json({ success: true });
   } catch (error) {
