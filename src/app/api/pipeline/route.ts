@@ -5,8 +5,7 @@ import { broadcast } from '@/lib/events';
 import type { ContentItem } from '@/lib/types';
 
 /**
- * GET /api/pipeline
- * List all content items
+ * GET /api/pipeline - List all content items
  */
 export async function GET(request: NextRequest) {
   try {
@@ -16,20 +15,21 @@ export async function GET(request: NextRequest) {
 
     let sql = 'SELECT * FROM content_items WHERE 1=1';
     const params: string[] = [];
+    let paramIndex = 1;
 
     if (stage) {
-      sql += ' AND stage = ?';
+      sql += ` AND stage = $${paramIndex++}`;
       params.push(stage);
     }
 
     if (platform) {
-      sql += ' AND platform = ?';
+      sql += ` AND platform = $${paramIndex++}`;
       params.push(platform);
     }
 
     sql += ' ORDER BY created_at DESC';
 
-    const items = queryAll(sql, params);
+    const items = await queryAll(sql, params);
 
     return NextResponse.json({ success: true, items, count: items.length });
   } catch (error) {
@@ -39,8 +39,7 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * POST /api/pipeline
- * Create a new content item
+ * POST /api/pipeline - Create a new content item
  */
 export async function POST(request: NextRequest) {
   try {
@@ -52,19 +51,16 @@ export async function POST(request: NextRequest) {
     }
 
     const id = uuidv4();
-    const now = new Date().toISOString();
 
-    run(
+    await run(
       `INSERT INTO content_items (id, title, type, platform, stage, content, assigned_to, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'idea', ?, ?, ?, ?)`,
-      [id, title, type, platform, JSON.stringify(content || {}), assigned_to || null, now, now]
+       VALUES ($1, $2, $3, $4, 'idea', $5, $6, NOW(), NOW())`,
+      [id, title, type, platform, JSON.stringify(content || {}), assigned_to || null]
     );
 
-    const item = queryOne<ContentItem>('SELECT * FROM content_items WHERE id = ?', [id]);
+    const item = await queryOne<ContentItem>('SELECT * FROM content_items WHERE id = $1', [id]);
 
-    if (item && item.id) {
-      broadcast({ type: 'pipeline_updated', payload: item });
-    }
+    if (item) broadcast({ type: 'pipeline_updated', payload: item });
 
     return NextResponse.json({ success: true, item });
   } catch (error) {
