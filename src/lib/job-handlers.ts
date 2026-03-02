@@ -6,6 +6,7 @@
 
 import { run, queryAll } from './db';
 import { registerHandler, getPendingJobs, claimAndRunJob, INSTANCE_ID } from './scheduler';
+import { processPendingDeliveries } from './webhooks';
 
 const AGENT_NAME = process.env.MC_AGENT_NAME || 'Unknown Agent';
 const INSTANCE_ROLE = process.env.MC_INSTANCE_ROLE || 'worker';
@@ -154,7 +155,6 @@ export async function markOfflineInstances(): Promise<void> {
  * Process pending webhook deliveries
  */
 export async function processWebhookDeliveries(): Promise<void> {
-  const { processPendingDeliveries } = require('./webhooks');
   const processed = await processPendingDeliveries();
   console.log(`[processWebhookDeliveries] Processed ${processed} deliveries`);
 }
