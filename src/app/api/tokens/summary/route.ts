@@ -13,35 +13,80 @@ export async function GET(request: NextRequest) {
     const startDate = searchParams.get('start_date');
     const endDate = searchParams.get('end_date');
 
-    // Build date filter
-    let dateFilter = '';
+    // Build WHERE clause conditions
+    const conditions: string[] = [];
     const params: any[] = [];
     let paramIndex = 1;
 
-    if (startDate) { dateFilter += ` AND created_at >= $${paramIndex++}`; params.push(startDate); }
-    if (endDate) { dateFilter += ` AND created_at <= $${paramIndex++}`; params.push(endDate); }
+    if (startDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      params.push(startDate);
+    }
+    if (endDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      params.push(endDate);
+    }
+
+    const whereClause = conditions.length > 0 
+      ? `WHERE ${conditions.join(' AND ')}`
+      : '';
 
     // Total summary
     const totals = await queryAll<{ total_tokens: string; total_cost: string; total_input_tokens: string; total_output_tokens: string; record_count: string }>(
-      `SELECT COALESCE(SUM(total_tokens), 0) as total_tokens, COALESCE(SUM(cost), 0) as total_cost, COALESCE(SUM(input_tokens), 0) as total_input_tokens, COALESCE(SUM(output_tokens), 0) as total_output_tokens, COUNT(*) as record_count FROM token_usage WHERE 1=1${dateFilter}`,
+      `SELECT 
+        COALESCE(SUM(total_tokens), 0) as total_tokens,
+        COALESCE(SUM(cost), 0) as total_cost,
+        COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+        COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+        COUNT(*) as record_count 
+       FROM token_usage 
+       ${whereClause}`,
       params
     );
 
     // By agent
     const byAgent = await queryAll<{ agent_id: string; total_tokens: string; total_cost: string; record_count: string }>(
-      `SELECT agent_id, SUM(total_tokens) as total_tokens, SUM(cost) as total_cost, COUNT(*) as record_count FROM token_usage WHERE agent_id IS NOT NULL${dateFilter} GROUP BY agent_id ORDER BY total_cost DESC LIMIT 10`,
+      `SELECT 
+        agent_id, 
+        SUM(total_tokens) as total_tokens, 
+        SUM(cost) as total_cost, 
+        COUNT(*) as record_count 
+       FROM token_usage 
+       WHERE agent_id IS NOT NULL 
+       ${conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : ''}
+       GROUP BY agent_id 
+       ORDER BY total_cost DESC 
+       LIMIT 10`,
       params
     );
 
     // By model
     const byModel = await queryAll<{ model: string; total_tokens: string; total_cost: string; record_count: string }>(
-      `SELECT model, SUM(total_tokens) as total_tokens, SUM(cost) as total_cost, COUNT(*) as record_count FROM token_usage WHERE 1=1${dateFilter} GROUP BY model ORDER BY total_cost DESC LIMIT 10`,
+      `SELECT 
+        model, 
+        SUM(total_tokens) as total_tokens, 
+        SUM(cost) as total_cost, 
+        COUNT(*) as record_count 
+       FROM token_usage 
+       ${whereClause}
+       GROUP BY model 
+       ORDER BY total_cost DESC 
+       LIMIT 10`,
       params
     );
 
     // By day (last 30 days)
     const byDay = await queryAll<{ date: string; total_tokens: string; total_cost: string; record_count: string }>(
-      `SELECT DATE(created_at) as date, SUM(total_tokens) as total_tokens, SUM(cost) as total_cost, COUNT(*) as record_count FROM token_usage WHERE created_at >= NOW() - INTERVAL '30 days'${dateFilter.replace('WHERE 1=1', 'AND')} GROUP BY DATE(created_at) ORDER BY date DESC`,
+      `SELECT 
+        DATE(created_at) as date, 
+        SUM(total_tokens) as total_tokens, 
+        SUM(cost) as total_cost, 
+        COUNT(*) as record_count 
+       FROM token_usage 
+       WHERE created_at >= NOW() - INTERVAL '30 days'
+       ${conditions.length > 0 ? `AND ${conditions.join(' AND ')}` : ''}
+       GROUP BY DATE(created_at) 
+       ORDER BY date DESC`,
       params
     );
 
@@ -80,7 +125,10 @@ export async function GET(request: NextRequest) {
       })),
     });
   } catch (error) {
-    console.error('Failed to fetch token summary:', error);
-    return NextResponse.json({ error: 'Failed to fetch token summary' }, { status: 500 });
+    console.error('Failed to get token summary:', error);
+    return NextResponse.json({ 
+      error: 'Failed to get token summary',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 });
   }
 }
