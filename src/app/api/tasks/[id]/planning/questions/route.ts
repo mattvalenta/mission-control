@@ -1,12 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb, queryOne } from '@/lib/db';
+import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 
 /**
- * POST /api/tasks/[id]/planning/questions
- * 
- * Called by Skippy to submit generated questions
- * This is the endpoint Skippy POSTs to after generating questions
+ * POST /api/tasks/[id]/planning/questions - Submit generated questions
  */
 export async function POST(
   request: NextRequest,
@@ -22,58 +19,21 @@ export async function POST(
       return NextResponse.json({ error: 'Questions array required' }, { status: 400 });
     }
 
-    const task = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as {
-      id: string;
-      planning_messages?: string;
-    } | undefined;
+    const task = await queryOne<{ id: string; planning_messages?: string }>('SELECT * FROM tasks WHERE id = $1', [taskId]);
+    if (!task) return NextResponse.json({ error: 'Task not found' }, { status: 404 });
 
-    if (!task) {
-      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
-    }
-
-    // Get existing messages
     const messages = task.planning_messages ? JSON.parse(task.planning_messages) : [];
+    const filteredMessages = messages.filter((m: any) => !(m.role === 'system' && m.type === 'waiting_for_questions'));
+    filteredMessages.push({ role: 'system', type: 'batch_questions', questions, timestamp: Date.now() });
 
-    // Replace waiting message with actual questions
-    const filteredMessages = messages.filter(
-      (m: { role: string; type?: string }) => 
-        !(m.role === 'system' && m.type === 'waiting_for_questions')
-    );
+    await run('UPDATE tasks SET planning_messages = $1, updated_at = NOW() WHERE id = $2', [JSON.stringify(filteredMessages), taskId]);
 
-    // Add batch questions
-    filteredMessages.push({
-      role: 'system',
-      type: 'batch_questions',
-      questions,
-      timestamp: Date.now()
-    });
+    const updatedTask = await queryOne('SELECT * FROM tasks WHERE id = $1', [taskId]);
+    if (updatedTask) broadcast({ type: 'task_updated', payload: updatedTask });
 
-    // Update task
-    getDb().prepare(`
-      UPDATE tasks
-      SET planning_messages = ?,
-          updated_at = datetime('now')
-      WHERE id = ?
-    `).run(JSON.stringify(filteredMessages), taskId);
-
-    // Broadcast update
-    const updatedTask = queryOne('SELECT * FROM tasks WHERE id = ?', [taskId]);
-    if (updatedTask) {
-      broadcast({
-        type: 'task_updated',
-        payload: updatedTask as any,
-      });
-    }
-
-    return NextResponse.json({
-      success: true,
-      message: `Added ${questions.length} questions to planning session`,
-      questionsCount: questions.length
-    });
+    return NextResponse.json({ success: true, message: `Added ${questions.length} questions`, questionsCount: questions.length });
   } catch (error) {
     console.error('Failed to add planning questions:', error);
-    return NextResponse.json({ 
-      error: 'Failed to add planning questions: ' + (error as Error).message 
-    }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to add planning questions: ' + (error as Error).message }, { status: 500 });
   }
 }
