@@ -4,6 +4,7 @@ import { queryOne, run } from '@/lib/db';
 import { notifyBoth } from '@/lib/db/notify-wrapper';
 import { getMissionControlUrl } from '@/lib/config';
 import { UpdateTaskSchema } from '@/lib/validation';
+import { logActivity, logStatusChange, logAssignment } from '@/lib/activity-logger';
 import type { Task, UpdateTaskRequest, Agent } from '@/lib/types';
 
 // GET /api/tasks/[id] - Get a single task
@@ -54,24 +55,63 @@ export async function PATCH(
 
     let shouldDispatch = false;
 
+    // Get the agent who is making this update
+    const updatedByAgentId = validatedData.updated_by_agent_id || null;
+    let updatedByAgentName: string | null = null;
+    if (updatedByAgentId) {
+      const updaterAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [updatedByAgentId]);
+      updatedByAgentName = updaterAgent?.name || null;
+    }
+
     if (validatedData.status !== undefined && validatedData.status !== existing.status) {
       updates.push(`status = $${paramIndex++}`);
       values.push(validatedData.status);
       if (validatedData.status === 'assigned' && existing.assigned_agent_id) shouldDispatch = true;
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
       await run(`INSERT INTO events (id, type, task_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`, [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`]);
+      
+      // Log activity for status change
+      await logStatusChange(
+        id,
+        existing.status,
+        validatedData.status,
+        updatedByAgentId || undefined,
+        updatedByAgentName || undefined,
+        validatedData.notes
+      );
     }
 
     if (validatedData.assigned_agent_id !== undefined && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
       updates.push(`assigned_agent_id = $${paramIndex++}`);
       values.push(validatedData.assigned_agent_id);
+      
+      // Get previous agent name
+      let previousAgentName: string | null = null;
+      if (existing.assigned_agent_id) {
+        const prevAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [existing.assigned_agent_id]);
+        previousAgentName = prevAgent?.name || null;
+      }
+      
+      // Get new agent name
+      let newAgentName: string | null = null;
       if (validatedData.assigned_agent_id) {
         const agent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.assigned_agent_id]);
-        if (agent) {
-          await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`]);
-          if (existing.status === 'assigned' || validatedData.status === 'assigned') shouldDispatch = true;
-        }
+        newAgentName = agent?.name || null;
+        
+        await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent?.name}`]);
+        if (existing.status === 'assigned' || validatedData.status === 'assigned') shouldDispatch = true;
       }
+      
+      // Log activity for assignment change
+      await logAssignment(
+        id,
+        existing.assigned_agent_id,
+        validatedData.assigned_agent_id,
+        previousAgentName,
+        newAgentName,
+        updatedByAgentId || undefined,
+        updatedByAgentName || undefined
+      );
     }
 
     if (updates.length === 0) return NextResponse.json({ error: 'No updates provided' }, { status: 400 });

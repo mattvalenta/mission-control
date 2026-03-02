@@ -5,7 +5,9 @@
  * Events trigger webhooks with retry logic and HMAC signing.
  */
 
-import crypto from 'crypto';
+// Use eval to prevent webpack from bundling crypto
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { createHmac, randomBytes } = eval('require')('crypto');
 import { queryOne, queryAll, run } from './db';
 import { notifyBoth } from './db/notify-wrapper';
 
@@ -113,8 +115,7 @@ export async function processDelivery(deliveryId: string): Promise<boolean> {
   // Generate HMAC signature
   const payloadStr = JSON.stringify(delivery.payload);
   const signature = delivery.secret
-    ? crypto
-        .createHmac('sha256', delivery.secret)
+    ? createHmac('sha256', delivery.secret)
         .update(payloadStr)
         .digest('hex')
     : '';

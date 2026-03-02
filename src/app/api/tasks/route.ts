@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
 import { notifyBoth } from '@/lib/db/notify-wrapper';
 import { CreateTaskSchema } from '@/lib/validation';
+import { logActivity } from '@/lib/activity-logger';
 import type { Task, CreateTaskRequest, Agent } from '@/lib/types';
 
 // GET /api/tasks - List all tasks with optional filters
@@ -67,6 +68,38 @@ export async function POST(request: NextRequest) {
     }
 
     await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage]);
+
+    // Get creator name for activity log
+    let creatorName: string | null = null;
+    if (validatedData.created_by_agent_id) {
+      const creator = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.created_by_agent_id]);
+      creatorName = creator?.name || null;
+    }
+
+    // Log task creation activity
+    await logActivity({
+      taskId: id,
+      agentId: validatedData.created_by_agent_id,
+      agentName: creatorName || undefined,
+      activityType: 'task_created',
+      message: `Task created: ${validatedData.title}`,
+      metadata: { title: validatedData.title, status, priority: validatedData.priority }
+    });
+
+    // Log assignment if agent was assigned
+    if (assignedAgentId) {
+      const assignedAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [assignedAgentId]);
+      if (assignedAgent) {
+        await logActivity({
+          taskId: id,
+          agentId: validatedData.created_by_agent_id,
+          agentName: creatorName || undefined,
+          activityType: 'assigned',
+          message: `Assigned to ${assignedAgent.name}`,
+          metadata: { assignedAgentId, assignedAgentName: assignedAgent.name }
+        });
+      }
+    }
 
     const task = await queryOne<Task>(`SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name, ca.avatar_emoji as created_by_agent_emoji FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE t.id = $1`, [id]);
     

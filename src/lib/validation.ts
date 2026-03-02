@@ -44,6 +44,7 @@ export const UpdateTaskSchema = z.object({
   assigned_agent_id: z.string().uuid().optional().nullable(),
   due_date: z.string().optional().nullable(),
   updated_by_agent_id: z.string().uuid().optional(),
+  notes: z.string().max(5000, 'Notes must be 5000 characters or less').optional(),
 });
 
 // Activity validation schema

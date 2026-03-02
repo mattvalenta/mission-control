@@ -1,85 +1,58 @@
-/**
- * Task Activities API with notifications
- */
-
 import { NextRequest, NextResponse } from 'next/server';
-import { queryAll, queryOne, run } from '@/lib/db';
-import { notifyBoth } from '@/lib/db/notify-wrapper';
-import { CreateActivitySchema } from '@/lib/validation';
-import type { TaskActivity } from '@/lib/types';
+import { getTaskActivities, logNote } from '@/lib/activity-logger';
+import { queryOne } from '@/lib/db';
+import type { Task } from '@/lib/types';
 
-// GET /api/tasks/[id]/activities - Retrieve all activities for a task
+// GET /api/tasks/[id]/activities - Get all activities for a task
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id: taskId } = await params;
-
-    const activities = await queryAll<any>(`
-      SELECT a.*, ag.id as agent_id, ag.name as agent_name, ag.avatar_emoji as agent_avatar_emoji
-      FROM task_activities a LEFT JOIN agents ag ON a.agent_id = ag.id
-      WHERE a.task_id = $1 ORDER BY a.created_at DESC
-    `, [taskId]);
-
-    const result: TaskActivity[] = activities.map(row => ({
-      id: row.id, task_id: row.task_id, agent_id: row.agent_id,
-      activity_type: row.activity_type, message: row.message,
-      metadata: row.metadata, created_at: row.created_at,
-      agent: row.agent_id ? {
-        id: row.agent_id, name: row.agent_name, avatar_emoji: row.agent_avatar_emoji,
-        role: '', status: 'working' as const, is_master: false, workspace_id: 'default',
-        description: '', created_at: '', updated_at: ''
-      } : undefined,
-    }));
-
-    return NextResponse.json(result);
+    const { id } = await params;
+    
+    // Verify task exists
+    const task = await queryOne<Task>('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+    
+    const activities = await getTaskActivities(id);
+    
+    return NextResponse.json(activities);
   } catch (error) {
-    console.error('Error fetching activities:', error);
+    console.error('Failed to fetch task activities:', error);
     return NextResponse.json({ error: 'Failed to fetch activities' }, { status: 500 });
   }
 }
 
-// POST /api/tasks/[id]/activities - Log a new activity for a task
+// POST /api/tasks/[id]/activities - Add a note to a task
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id: taskId } = await params;
+    const { id } = await params;
     const body = await request.json();
     
-    const validation = CreateActivitySchema.safeParse(body);
-    if (!validation.success) return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
-
-    const { activity_type, message, agent_id, metadata } = validation.data;
-    const id = crypto.randomUUID();
-
-    await run(`INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [id, taskId, agent_id || null, activity_type, message, metadata || null]);
-
-    const activity = await queryOne<any>(`
-      SELECT a.*, ag.id as agent_id, ag.name as agent_name, ag.avatar_emoji as agent_avatar_emoji
-      FROM task_activities a LEFT JOIN agents ag ON a.agent_id = ag.id WHERE a.id = $1
-    `, [id]);
-
-    const result: TaskActivity = {
-      id: activity!.id, task_id: activity!.task_id, agent_id: activity!.agent_id,
-      activity_type: activity!.activity_type, message: activity!.message,
-      metadata: activity!.metadata, created_at: activity!.created_at,
-      agent: activity!.agent_id ? {
-        id: activity!.agent_id, name: activity!.agent_name, avatar_emoji: activity!.agent_avatar_emoji,
-        role: '', status: 'working' as const, is_master: false, workspace_id: 'default',
-        description: '', created_at: '', updated_at: ''
-      } : undefined,
-    };
-
-    // Broadcast activity via SSE + PostgreSQL NOTIFY
-    await notifyBoth('activity_updates', 'activity_logged', { taskId, activity: result });
-
-    return NextResponse.json(result, { status: 201 });
+    // Verify task exists
+    const task = await queryOne<Task>('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (!task) {
+      return NextResponse.json({ error: 'Task not found' }, { status: 404 });
+    }
+    
+    const { note, agent_id, agent_name } = body;
+    
+    if (!note || typeof note !== 'string') {
+      return NextResponse.json({ error: 'Note is required' }, { status: 400 });
+    }
+    
+    await logNote(id, note, agent_id, agent_name);
+    
+    const activities = await getTaskActivities(id);
+    return NextResponse.json(activities, { status: 201 });
   } catch (error) {
-    console.error('Error creating activity:', error);
-    return NextResponse.json({ error: 'Failed to create activity' }, { status: 500 });
+    console.error('Failed to add note:', error);
+    return NextResponse.json({ error: 'Failed to add note' }, { status: 500 });
   }
 }
