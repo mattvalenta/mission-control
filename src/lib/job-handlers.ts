@@ -6,6 +6,29 @@
 
 import { run, queryAll } from './db';
 
+const INSTANCE_ID = process.env.MC_INSTANCE_ID || 'unknown';
+const AGENT_NAME = process.env.MC_AGENT_NAME || 'Unknown Agent';
+const INSTANCE_ROLE = process.env.MC_INSTANCE_ROLE || 'worker';
+
+/**
+ * Instance heartbeat
+ * Updates instance status in mc_instances table
+ */
+export async function instanceHeartbeat(): Promise<void> {
+  await run(
+    `INSERT INTO mc_instances (id, agent_name, role, status, last_heartbeat, started_at, updated_at)
+     VALUES ($1, $2, $3, 'online', NOW(), NOW(), NOW())
+     ON CONFLICT (id) 
+     DO UPDATE SET 
+       last_heartbeat = NOW(), 
+       status = 'online', 
+       updated_at = NOW()`,
+    [INSTANCE_ID, AGENT_NAME, INSTANCE_ROLE]
+  );
+
+  console.log(`[instanceHeartbeat] Heartbeat sent for ${INSTANCE_ID}`);
+}
+
 /**
  * Cleanup stale sessions
  * Mark sessions inactive after 2 hours of no activity
@@ -67,7 +90,6 @@ export async function cleanupOldNotifications(): Promise<void> {
  * Pre-calculate daily stats for faster dashboard queries
  */
 export async function aggregateTokenUsage(): Promise<void> {
-  // Check if token_usage_daily table exists
   try {
     // Create table if not exists
     await run(`
@@ -114,16 +136,43 @@ export async function aggregateTokenUsage(): Promise<void> {
 }
 
 /**
+ * Mark offline instances
+ * Set status to offline if no heartbeat in 5 minutes
+ */
+export async function markOfflineInstances(): Promise<void> {
+  const result = await run(
+    `UPDATE mc_instances 
+     SET status = 'offline', updated_at = NOW()
+     WHERE status = 'online' 
+       AND last_heartbeat < NOW() - INTERVAL '5 minutes'`
+  );
+
+  console.log(`[markOfflineInstances] Marked ${result.rowCount || 0} instances as offline`);
+}
+
+/**
+ * Process pending webhook deliveries
+ */
+export async function processWebhookDeliveries(): Promise<void> {
+  const { processPendingDeliveries } = require('./webhooks');
+  const processed = await processPendingDeliveries();
+  console.log(`[processWebhookDeliveries] Processed ${processed} deliveries`);
+}
+
+/**
  * Register all built-in handlers
  */
 export function registerBuiltinHandlers(): void {
   const { registerHandler } = require('./scheduler');
 
+  registerHandler('instanceHeartbeat', instanceHeartbeat);
   registerHandler('cleanupStaleSessions', cleanupStaleSessions);
   registerHandler('checkAgentHeartbeats', checkAgentHeartbeats);
   registerHandler('cleanupOldAuditLogs', cleanupOldAuditLogs);
   registerHandler('cleanupOldNotifications', cleanupOldNotifications);
   registerHandler('aggregateTokenUsage', aggregateTokenUsage);
+  registerHandler('markOfflineInstances', markOfflineInstances);
+  registerHandler('processWebhookDeliveries', processWebhookDeliveries);
 
-  console.log('[JobHandlers] Registered 5 built-in handlers');
+  console.log('[JobHandlers] Registered 8 built-in handlers');
 }
