@@ -195,7 +195,7 @@ async function moveToDLQ(
   retryCount: number
 ) {
   await run(
-    `INSERT INTO dead_letter_queue (job_name, original_job_id, failure_reason, retry_count)
+    `INSERT INTO dead_letter_queue (job_name, job_id, failure_reason, retry_count)
      VALUES ($1, $2, $3, $4)`,
     [jobName, jobId, error, retryCount]
   );
@@ -261,8 +261,8 @@ export async function resolveDLQEntry(id: string, resolvedBy: string) {
 export async function retryDLQEntry(id: string) {
   const entry = await queryOne<{
     job_name: string;
-    original_job_id: string;
-  }>('SELECT job_name, original_job_id FROM dead_letter_queue WHERE id = $1', [id]);
+    job_id: string;
+  }>('SELECT job_name, job_id FROM dead_letter_queue WHERE id = $1', [id]);
 
   if (!entry) {
     throw new Error('DLQ entry not found');
@@ -271,7 +271,7 @@ export async function retryDLQEntry(id: string) {
   // Re-enable the job
   await run(
     'UPDATE scheduled_jobs SET enabled = true WHERE id = $1',
-    [entry.original_job_id]
+    [entry.job_id]
   );
 
   // Mark as resolved
