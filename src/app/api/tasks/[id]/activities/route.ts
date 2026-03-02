@@ -1,18 +1,14 @@
 /**
- * Task Activities API
- * Endpoints for logging and retrieving task activities
+ * Task Activities API with notifications
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { queryAll, queryOne, run } from '@/lib/db';
-import { broadcast } from '@/lib/events';
+import { notifyBoth } from '@/lib/db/notify-wrapper';
 import { CreateActivitySchema } from '@/lib/validation';
 import type { TaskActivity } from '@/lib/types';
 
-/**
- * GET /api/tasks/[id]/activities
- * Retrieve all activities for a task
- */
+// GET /api/tasks/[id]/activities - Retrieve all activities for a task
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -44,10 +40,7 @@ export async function GET(
   }
 }
 
-/**
- * POST /api/tasks/[id]/activities
- * Log a new activity for a task
- */
+// POST /api/tasks/[id]/activities - Log a new activity for a task
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -57,17 +50,13 @@ export async function POST(
     const body = await request.json();
     
     const validation = CreateActivitySchema.safeParse(body);
-    if (!validation.success) {
-      return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
-    }
+    if (!validation.success) return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
 
     const { activity_type, message, agent_id, metadata } = validation.data;
     const id = crypto.randomUUID();
 
-    await run(`
-      INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
-    `, [id, taskId, agent_id || null, activity_type, message, metadata || null]);
+    await run(`INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [id, taskId, agent_id || null, activity_type, message, metadata || null]);
 
     const activity = await queryOne<any>(`
       SELECT a.*, ag.id as agent_id, ag.name as agent_name, ag.avatar_emoji as agent_avatar_emoji
@@ -85,7 +74,9 @@ export async function POST(
       } : undefined,
     };
 
-    broadcast({ type: 'activity_logged', payload: result });
+    // Broadcast activity via SSE + PostgreSQL NOTIFY
+    await notifyBoth('activity_updates', 'activity_logged', { taskId, activity: result });
+
     return NextResponse.json(result, { status: 201 });
   } catch (error) {
     console.error('Error creating activity:', error);

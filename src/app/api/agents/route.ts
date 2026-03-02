@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
+import { notifyBoth } from '@/lib/db/notify-wrapper';
 import type { Agent, CreateAgentRequest } from '@/lib/types';
 
 // GET /api/agents - List all agents
@@ -26,9 +27,7 @@ export async function POST(request: NextRequest) {
   try {
     const body: CreateAgentRequest = await request.json();
 
-    if (!body.name || !body.role) {
-      return NextResponse.json({ error: 'Name and role are required' }, { status: 400 });
-    }
+    if (!body.name || !body.role) return NextResponse.json({ error: 'Name and role are required' }, { status: 400 });
 
     const id = uuidv4();
 
@@ -42,12 +41,16 @@ export async function POST(request: NextRequest) {
       ]
     );
 
-    await run(
-      `INSERT INTO events (id, type, agent_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`,
-      [uuidv4(), 'agent_joined', id, `${body.name} joined the team`]
-    );
+    await run(`INSERT INTO events (id, type, agent_id, message, created_at) VALUES ($1, $2, $3, $4, NOW())`,
+      [uuidv4(), 'agent_joined', id, `${body.name} joined the team`]);
 
     const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
+
+    // Broadcast agent creation via SSE + PostgreSQL NOTIFY
+    if (agent) {
+      await notifyBoth('agent_updates', 'agent_created', { agentId: id, agent });
+    }
+
     return NextResponse.json(agent, { status: 201 });
   } catch (error) {
     console.error('Failed to create agent:', error);
