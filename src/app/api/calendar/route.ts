@@ -3,8 +3,7 @@ import { queryAll, queryOne, run } from '@/lib/db';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * GET /api/calendar
- * List calendar events
+ * GET /api/calendar - List calendar events
  */
 export async function GET(request: NextRequest) {
   try {
@@ -15,25 +14,26 @@ export async function GET(request: NextRequest) {
 
     let sql = 'SELECT * FROM calendar_events WHERE 1=1';
     const params: string[] = [];
+    let paramIndex = 1;
 
     if (start) {
-      sql += ' AND date(start_time) >= date(?)';
+      sql += ` AND DATE(start_time) >= DATE($${paramIndex++})`;
       params.push(start);
     }
 
     if (end) {
-      sql += ' AND date(start_time) <= date(?)';
+      sql += ` AND DATE(start_time) <= DATE($${paramIndex++})`;
       params.push(end);
     }
 
     if (tier) {
-      sql += ' AND tier = ?';
+      sql += ` AND tier = $${paramIndex++}`;
       params.push(tier);
     }
 
     sql += ' ORDER BY start_time ASC';
 
-    const events = queryAll(sql, params);
+    const events = await queryAll(sql, params);
 
     return NextResponse.json({ success: true, events, count: events.length });
   } catch (error) {
@@ -43,8 +43,7 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * POST /api/calendar
- * Create a new calendar event
+ * POST /api/calendar - Create a new calendar event
  */
 export async function POST(request: NextRequest) {
   try {
@@ -57,28 +56,15 @@ export async function POST(request: NextRequest) {
 
     const id = uuidv4();
 
-    run(
-      `INSERT INTO calendar_events 
-       (id, title, description, start_time, end_time, type, tier, agent_id, agent_name, color, recurring)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        title,
-        description || null,
-        start_time,
-        end_time || null,
-        type || 'meeting',
-        tier || 'manager',
-        agent_id || 'unknown',
-        agent_name || 'Unknown',
-        color || '#3B82F6',
-        recurring ? JSON.stringify(recurring) : null,
-      ]
+    await run(
+      `INSERT INTO calendar_events (id, title, description, start_time, end_time, type, tier, agent_id, agent_name, color, recurring, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())`,
+      [id, title, description || null, start_time, end_time || null, type || 'meeting', tier || 'manager', agent_id || 'unknown', agent_name || 'Unknown', color || '#3B82F6', recurring ? JSON.stringify(recurring) : null]
     );
 
-    const event = queryOne('SELECT * FROM calendar_events WHERE id = ?', [id]);
+    const event = await queryOne('SELECT * FROM calendar_events WHERE id = $1', [id]);
 
-    return NextResponse.json({ success: true, event });
+    return NextResponse.json({ success: true, event }, { status: 201 });
   } catch (error) {
     console.error('Failed to create calendar event:', error);
     return NextResponse.json({ error: 'Failed to create event' }, { status: 500 });
