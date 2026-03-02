@@ -5,15 +5,23 @@
  * background services like the job scheduler.
  */
 
+import { registerBuiltinHandlers, instanceHeartbeat } from './lib/job-handlers';
+import { getPendingJobs, claimAndRunJob } from './lib/scheduler';
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    // Initialize job scheduler
-    const { registerBuiltinHandlers } = await import('./lib/job-handlers');
-    const { getPendingJobs, claimAndRunJob } = await import('./lib/scheduler');
+    console.log('[Instrumentation] Starting initialization...');
 
     // Register all built-in handlers
     registerBuiltinHandlers();
-    console.log('[Instrumentation] Job handlers registered');
+
+    // Send initial heartbeat immediately
+    try {
+      await instanceHeartbeat();
+      console.log('[Instrumentation] Initial heartbeat sent');
+    } catch (error) {
+      console.error('[Instrumentation] Failed to send initial heartbeat:', error);
+    }
 
     // Start scheduler loop
     const SCHEDULE_INTERVAL = 30000; // 30 seconds
@@ -34,20 +42,11 @@ export async function register() {
       }
     }
 
-    // Run immediately on startup
+    // Run immediately
     runScheduler().catch(console.error);
 
     // Then run on interval
     setInterval(runScheduler, SCHEDULE_INTERVAL);
     console.log('[Instrumentation] Job scheduler started (30s interval)');
-
-    // Send initial heartbeat
-    const { instanceHeartbeat } = await import('./lib/job-handlers');
-    try {
-      await instanceHeartbeat();
-      console.log('[Instrumentation] Initial heartbeat sent');
-    } catch (error) {
-      console.error('[Instrumentation] Failed to send initial heartbeat:', error);
-    }
   }
 }

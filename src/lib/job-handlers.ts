@@ -5,8 +5,8 @@
  */
 
 import { run, queryAll } from './db';
+import { registerHandler, getPendingJobs, claimAndRunJob, INSTANCE_ID } from './scheduler';
 
-const INSTANCE_ID = process.env.MC_INSTANCE_ID || 'unknown';
 const AGENT_NAME = process.env.MC_AGENT_NAME || 'Unknown Agent';
 const INSTANCE_ROLE = process.env.MC_INSTANCE_ROLE || 'worker';
 
@@ -26,7 +26,7 @@ export async function instanceHeartbeat(): Promise<void> {
     [INSTANCE_ID, AGENT_NAME, INSTANCE_ROLE]
   );
 
-  console.log(`[instanceHeartbeat] Heartbeat sent for ${INSTANCE_ID}`);
+  console.log(`[instanceHeartbeat] Heartbeat sent for ${INSTANCE_ID} (${AGENT_NAME})`);
 }
 
 /**
@@ -163,8 +163,6 @@ export async function processWebhookDeliveries(): Promise<void> {
  * Register all built-in handlers
  */
 export function registerBuiltinHandlers(): void {
-  const { registerHandler } = require('./scheduler');
-
   registerHandler('instanceHeartbeat', instanceHeartbeat);
   registerHandler('cleanupStaleSessions', cleanupStaleSessions);
   registerHandler('checkAgentHeartbeats', checkAgentHeartbeats);
@@ -176,3 +174,6 @@ export function registerBuiltinHandlers(): void {
 
   console.log('[JobHandlers] Registered 8 built-in handlers');
 }
+
+// Re-export for use in instrumentation
+export { INSTANCE_ID };
