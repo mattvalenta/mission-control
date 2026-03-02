@@ -26,34 +26,35 @@ export async function GET(request: NextRequest) {
       WHERE 1=1
     `;
     const params: unknown[] = [];
+    let paramIndex = 1;
 
     if (status) {
       // Support comma-separated status values (e.g., status=inbox,testing,in_progress)
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       if (statuses.length === 1) {
-        sql += ' AND t.status = ?';
+        sql += ` AND t.status = $${paramIndex++}`;
         params.push(statuses[0]);
       } else if (statuses.length > 1) {
-        sql += ` AND t.status IN (${statuses.map(() => '?').join(',')})`;
+        sql += ` AND t.status IN (${statuses.map(() => `$${paramIndex++}`).join(',')})`;
         params.push(...statuses);
       }
     }
     if (businessId) {
-      sql += ' AND t.business_id = ?';
+      sql += ` AND t.business_id = $${paramIndex++}`;
       params.push(businessId);
     }
     if (workspaceId) {
-      sql += ' AND t.workspace_id = ?';
+      sql += ` AND t.workspace_id = $${paramIndex++}`;
       params.push(workspaceId);
     }
     if (assignedAgentId) {
-      sql += ' AND t.assigned_agent_id = ?';
+      sql += ` AND t.assigned_agent_id = $${paramIndex++}`;
       params.push(assignedAgentId);
     }
 
     sql += ' ORDER BY t.created_at DESC';
 
-    const tasks = queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
+    const tasks = await queryAll<Task & { assigned_agent_name?: string; assigned_agent_emoji?: string; created_by_agent_name?: string }>(sql, params);
 
     // Transform to include nested agent info
     const transformedTasks = tasks.map((task) => ({
@@ -92,7 +93,6 @@ export async function POST(request: NextRequest) {
     const validatedData = validation.data;
 
     const id = uuidv4();
-    const now = new Date().toISOString();
 
     const workspaceId = validatedData.workspace_id || 'default';
     // Default status to 'planning' - all tasks start in planning mode for Skippy to assign
@@ -101,9 +101,9 @@ export async function POST(request: NextRequest) {
     const skippyAgentId = '3a90091a-a6e5-4abc-934e-117210d07d73';
     const assignedAgentId = validatedData.assigned_agent_id || skippyAgentId;
     
-    run(
+    await run(
       `INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())`,
       [
         id,
         validatedData.title,
@@ -115,28 +115,26 @@ export async function POST(request: NextRequest) {
         workspaceId,
         validatedData.business_id || 'default',
         validatedData.due_date || null,
-        now,
-        now,
       ]
     );
 
     // Log event
     let eventMessage = `New task: ${validatedData.title}`;
     if (validatedData.created_by_agent_id) {
-      const creator = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.created_by_agent_id]);
+      const creator = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.created_by_agent_id]);
       if (creator) {
         eventMessage = `${creator.name} created task: ${validatedData.title}`;
       }
     }
 
-    run(
+    await run(
       `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage, now]
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage]
     );
 
     // Fetch created task with all joined fields
-    const task = queryOne<Task>(
+    const task = await queryOne<Task>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
@@ -145,7 +143,7 @@ export async function POST(request: NextRequest) {
        FROM tasks t
        LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
        LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-       WHERE t.id = ?`,
+       WHERE t.id = $1`,
       [id]
     );
     
