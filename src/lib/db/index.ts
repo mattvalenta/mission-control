@@ -1,62 +1,67 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
-import { schema } from './schema';
-import { runMigrations } from './migrations';
+/**
+ * Database Module for Mission Control
+ * 
+ * PostgreSQL-based database module for distributed architecture.
+ * Replaces SQLite with PostgreSQL as the primary database.
+ */
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
+import { 
+  getPool, 
+  closePool, 
+  queryAll as pgQueryAll, 
+  queryOne as pgQueryOne, 
+  run as pgRun, 
+  transaction as pgTransaction,
+  healthCheck,
+  getPoolStats,
+  PoolClient,
+  QueryResult
+} from './postgres';
 
-let db: Database.Database | null = null;
+// Re-export types
+export type { PoolClient, QueryResult };
 
-export function getDb(): Database.Database {
-  if (!db) {
-    const isNewDb = !fs.existsSync(DB_PATH);
-    
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-
-    // Initialize base schema (creates tables if they don't exist)
-    db.exec(schema);
-
-    // Run migrations for schema updates
-    // This handles both new and existing databases
-    runMigrations(db);
-    
-    if (isNewDb) {
-      console.log('[DB] New database created at:', DB_PATH);
-    }
-  }
-  return db;
+/**
+ * Execute a query and return all rows
+ */
+export function queryAll<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  return pgQueryAll<T>(sql, params);
 }
 
-export function closeDb(): void {
-  if (db) {
-    db.close();
-    db = null;
-  }
+/**
+ * Execute a query and return a single row
+ */
+export function queryOne<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+  return pgQueryOne<T>(sql, params);
 }
 
-// Type-safe query helpers
-export function queryAll<T>(sql: string, params: unknown[] = []): T[] {
-  const stmt = getDb().prepare(sql);
-  return stmt.all(...params) as T[];
+/**
+ * Execute a query that modifies data (INSERT, UPDATE, DELETE)
+ */
+export function run(sql: string, params: unknown[] = []): Promise<QueryResult> {
+  return pgRun(sql, params);
 }
 
-export function queryOne<T>(sql: string, params: unknown[] = []): T | undefined {
-  const stmt = getDb().prepare(sql);
-  return stmt.get(...params) as T | undefined;
+/**
+ * Execute a transaction
+ */
+export function transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return pgTransaction(fn);
 }
 
-export function run(sql: string, params: unknown[] = []): Database.RunResult {
-  const stmt = getDb().prepare(sql);
-  return stmt.run(...params);
+/**
+ * Close the database connection
+ */
+export function closeDb(): Promise<void> {
+  return closePool();
 }
 
-export function transaction<T>(fn: () => T): T {
-  const db = getDb();
-  return db.transaction(fn)();
-}
+/**
+ * Check database health
+ */
+export { healthCheck, getPoolStats };
 
-// Export migration utilities for CLI use
-export { runMigrations, getMigrationStatus } from './migrations';
+/**
+ * Get the connection pool (for advanced usage)
+ */
+export { getPool };
