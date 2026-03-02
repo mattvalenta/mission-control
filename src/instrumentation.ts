@@ -3,14 +3,18 @@
  * 
  * Runs once when the server starts. Used to initialize
  * background services like the job scheduler.
+ * 
+ * IMPORTANT: Use dynamic imports inside the runtime guard
+ * to avoid edge runtime incompatibility with 'pg' module.
  */
-
-import { registerBuiltinHandlers, instanceHeartbeat } from './lib/job-handlers';
-import { getPendingJobs, claimAndRunJob } from './lib/scheduler';
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     console.log('[Instrumentation] Starting initialization...');
+
+    // Dynamic imports to avoid edge runtime issues with 'pg' module
+    const { registerBuiltinHandlers, instanceHeartbeat } = await import('./lib/job-handlers');
+    const { getPendingJobs, claimAndRunJob } = await import('./lib/scheduler');
 
     // Register all built-in handlers
     registerBuiltinHandlers();
