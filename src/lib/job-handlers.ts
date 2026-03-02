@@ -15,14 +15,14 @@ const INSTANCE_ROLE = process.env.MC_INSTANCE_ROLE || 'worker';
  * Updates instance status in mc_instances table
  */
 export async function instanceHeartbeat(): Promise<void> {
+  // Use actual schema: id, agent_name, role, status, last_heartbeat
   await run(
-    `INSERT INTO mc_instances (id, agent_name, role, status, last_heartbeat, started_at, updated_at)
-     VALUES ($1, $2, $3, 'online', NOW(), NOW(), NOW())
+    `INSERT INTO mc_instances (id, agent_name, role, status, last_heartbeat, started_at)
+     VALUES ($1, $2, $3, 'online', NOW(), NOW())
      ON CONFLICT (id) 
      DO UPDATE SET 
        last_heartbeat = NOW(), 
-       status = 'online', 
-       updated_at = NOW()`,
+       status = 'online'`,
     [INSTANCE_ID, AGENT_NAME, INSTANCE_ROLE]
   );
 
@@ -142,7 +142,7 @@ export async function aggregateTokenUsage(): Promise<void> {
 export async function markOfflineInstances(): Promise<void> {
   const result = await run(
     `UPDATE mc_instances 
-     SET status = 'offline', updated_at = NOW()
+     SET status = 'offline'
      WHERE status = 'online' 
        AND last_heartbeat < NOW() - INTERVAL '5 minutes'`
   );
