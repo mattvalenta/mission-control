@@ -1,21 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import pg from 'pg';
-
-const { Pool } = pg;
-
-const pool = new Pool({ 
-  connectionString: process.env.POSTGRES_URL,
-  ssl: { rejectUnauthorized: false }
-});
+import { queryAll } from '@/lib/db';
 
 /**
- * GET /api/agent/view-tasks
- * View tasks (for remote agents)
- * 
- * Query params:
- * - agent_id: Filter by assigned agent
- * - status: Filter by status (comma-separated for multiple)
- * - limit: Max results (default 100)
+ * GET /api/agent/view-tasks - View tasks (for remote agents)
  */
 export async function GET(request: NextRequest) {
   try {
@@ -25,52 +12,41 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '100');
     
     let query = `
-      SELECT 
-        t.*,
-        a.name as assigned_agent_name,
-        ca.name as created_by_agent_name
-      FROM mc_tasks t
-      LEFT JOIN mc_agents a ON t.assigned_agent_id = a.id
-      LEFT JOIN mc_agents ca ON t.created_by_agent_id = ca.id
-      WHERE 1=1
+      SELECT t.*, a.name as assigned_agent_name, ca.name as created_by_agent_name
+      FROM tasks t LEFT JOIN agents a ON t.assigned_agent_id = a.id
+      LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE 1=1
     `;
     const params: any[] = [];
+    let paramIndex = 1;
     
     if (agentId) {
+      query += ` AND t.assigned_agent_id = $${paramIndex++}`;
       params.push(agentId);
-      query += ` AND t.assigned_agent_id = $${params.length}`;
     }
     
     if (status) {
       const statuses = status.split(',').map(s => s.trim()).filter(Boolean);
       if (statuses.length === 1) {
+        query += ` AND t.status = $${paramIndex++}`;
         params.push(statuses[0]);
-        query += ` AND t.status = $${params.length}`;
       } else if (statuses.length > 1) {
-        query += ` AND t.status IN (${statuses.map((_, i) => `$${params.length + i + 1}`).join(',')})`;
+        query += ` AND t.status IN (${statuses.map(() => `$${paramIndex++}`).join(',')})`;
         params.push(...statuses);
       }
     }
     
-    query += ` ORDER BY t.updated_at DESC LIMIT $${params.length + 1}`;
+    query += ` ORDER BY t.updated_at DESC LIMIT $${paramIndex}`;
     params.push(limit);
     
-    const result = await pool.query(query, params);
+    const tasks = await queryAll<any>(query, params);
     
-    // Transform to include nested agent info
-    const tasks = result.rows.map((task: any) => ({
+    const transformed = tasks.map((task: any) => ({
       ...task,
-      assigned_agent: task.assigned_agent_id ? {
-        id: task.assigned_agent_id,
-        name: task.assigned_agent_name
-      } : null,
-      created_by: task.created_by_agent_id ? {
-        id: task.created_by_agent_id,
-        name: task.created_by_agent_name
-      } : null
+      assigned_agent: task.assigned_agent_id ? { id: task.assigned_agent_id, name: task.assigned_agent_name } : null,
+      created_by: task.created_by_agent_id ? { id: task.created_by_agent_id, name: task.created_by_agent_name } : null
     }));
     
-    return NextResponse.json(tasks);
+    return NextResponse.json(transformed);
   } catch (error) {
     console.error('Failed to fetch tasks:', error);
     return NextResponse.json({ error: 'Failed to fetch tasks' }, { status: 500 });
