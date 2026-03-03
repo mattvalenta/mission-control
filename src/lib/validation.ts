@@ -1,4 +1,5 @@
-import { z } from 'zod';
+// Agent ID validation - accepts UUID or string ID (like "skippy")
+const AgentIdSchema = z.string().min(1, 'Agent ID is required');
 
 // Task status and priority enums from types
 const TaskStatus = z.enum([
@@ -30,7 +31,9 @@ export const CreateTaskSchema = z.object({
   status: TaskStatus.optional(),
   priority: TaskPriority.optional(),
   assigned_agent_id: z.string().uuid().optional().nullable(),
-  created_by_agent_id: z.string().uuid().optional().nullable(),
+  created_by_agent_id: AgentIdSchema.refine(val => val && val.length > 0, {
+    message: 'created_by_agent_id is required - all tasks must be signed by the creating agent'
+  }),
   business_id: z.string().optional().nullable(),
   workspace_id: z.string().optional().nullable(),
   due_date: z.string().optional().nullable(),
@@ -43,7 +46,9 @@ export const UpdateTaskSchema = z.object({
   priority: TaskPriority.optional(),
   assigned_agent_id: z.string().uuid().optional().nullable(),
   due_date: z.string().optional().nullable(),
-  updated_by_agent_id: z.string().uuid().optional(),
+  updated_by_agent_id: AgentIdSchema.refine(val => val && val.length > 0, {
+    message: 'updated_by_agent_id is required - all task updates must be signed by the agent'
+  }),
   notes: z.string().max(5000, 'Notes must be 5000 characters or less').optional(),
 });
 

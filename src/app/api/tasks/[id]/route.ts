@@ -30,7 +30,15 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
-    const body: UpdateTaskRequest & { updated_by_agent_id?: string } = await request.json();
+    const body: UpdateTaskRequest & { updated_by_agent_id: string } = await request.json();
+
+    // REQUIRE updated_by_agent_id - all task updates must be signed by the agent
+    if (!body.updated_by_agent_id) {
+      return NextResponse.json({ 
+        error: 'Validation failed', 
+        details: [{ path: ['updated_by_agent_id'], message: 'updated_by_agent_id is required - all task updates must be signed by the agent' }] 
+      }, { status: 400 });
+    }
 
     const validation = UpdateTaskSchema.safeParse(body);
     if (!validation.success) return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
@@ -56,12 +64,9 @@ export async function PATCH(
     let shouldDispatch = false;
 
     // Get the agent who is making this update
-    const updatedByAgentId = validatedData.updated_by_agent_id || null;
-    let updatedByAgentName: string | null = null;
-    if (updatedByAgentId) {
-      const updaterAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [updatedByAgentId]);
-      updatedByAgentName = updaterAgent?.name || null;
-    }
+    const updatedByAgentId = validatedData.updated_by_agent_id!;
+    const updaterAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [updatedByAgentId]);
+    const updatedByAgentName = updaterAgent?.name || 'Unknown Agent';
 
     if (validatedData.status !== undefined && validatedData.status !== existing.status) {
       updates.push(`status = $${paramIndex++}`);
@@ -75,8 +80,8 @@ export async function PATCH(
         id,
         existing.status,
         validatedData.status,
-        updatedByAgentId || undefined,
-        updatedByAgentName || undefined,
+        updatedByAgentId,
+        updatedByAgentName,
         validatedData.notes
       );
     }
@@ -109,8 +114,8 @@ export async function PATCH(
         validatedData.assigned_agent_id,
         previousAgentName,
         newAgentName,
-        updatedByAgentId || undefined,
-        updatedByAgentName || undefined
+        updatedByAgentId,
+        updatedByAgentName
       );
     }
 

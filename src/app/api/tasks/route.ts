@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     const assignedAgentId = searchParams.get('assigned_agent_id');
 
     let sql = `
-      SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name
+      SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name, ca.avatar_emoji as created_by_agent_emoji
       FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE 1=1
     `;
     const params: unknown[] = [];
@@ -45,8 +45,16 @@ export async function GET(request: NextRequest) {
 // POST /api/tasks - Create a new task
 export async function POST(request: NextRequest) {
   try {
-    const body: CreateTaskRequest = await request.json();
+    const body: CreateTaskRequest & { created_by_agent_id: string } = await request.json();
     console.log('[POST /api/tasks] Received body:', JSON.stringify(body));
+
+    // REQUIRE created_by_agent_id - all tasks must be signed by the creating agent
+    if (!body.created_by_agent_id) {
+      return NextResponse.json({ 
+        error: 'Validation failed', 
+        details: [{ path: ['created_by_agent_id'], message: 'created_by_agent_id is required - all tasks must be signed by the creating agent' }] 
+      }, { status: 400 });
+    }
 
     const validation = CreateTaskSchema.safeParse(body);
     if (!validation.success) return NextResponse.json({ error: 'Validation failed', details: validation.error.issues }, { status: 400 });
@@ -54,33 +62,22 @@ export async function POST(request: NextRequest) {
     const validatedData = validation.data;
     const id = uuidv4();
     const workspaceId = validatedData.workspace_id || 'default';
-    const status = validatedData.status || 'planning';
-    const skippyAgentId = '3a90091a-a6e5-4abc-934e-117210d07d73';
+    const status = validatedData.status || 'inbox';
+    const skippyAgentId = 'skippy'; // Default to Skippy if no assignment
     const assignedAgentId = validatedData.assigned_agent_id || skippyAgentId;
     
+    // Get creator agent name for activity log
+    const creatorAgent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.created_by_agent_id!]);
+    const creatorName = creatorAgent?.name || 'Unknown Agent';
+
     await run(`INSERT INTO tasks (id, title, description, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, due_date, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())`,
-      [id, validatedData.title, validatedData.description || null, status, validatedData.priority || 'normal', assignedAgentId, validatedData.created_by_agent_id || null, workspaceId, validatedData.business_id || 'default', validatedData.due_date || null]);
-
-    let eventMessage = `New task: ${validatedData.title}`;
-    if (validatedData.created_by_agent_id) {
-      const creator = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.created_by_agent_id]);
-      if (creator) eventMessage = `${creator.name} created task: ${validatedData.title}`;
-    }
-
-    await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_created', body.created_by_agent_id || null, id, eventMessage]);
-
-    // Get creator name for activity log
-    let creatorName: string | null = null;
-    if (validatedData.created_by_agent_id) {
-      const creator = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.created_by_agent_id]);
-      creatorName = creator?.name || null;
-    }
+      [id, validatedData.title, validatedData.description || null, status, validatedData.priority || 'normal', assignedAgentId, validatedData.created_by_agent_id, workspaceId, validatedData.business_id || 'default', validatedData.due_date || null]);
 
     // Log task creation activity
     await logActivity({
       taskId: id,
-      agentId: validatedData.created_by_agent_id,
-      agentName: creatorName || undefined,
+      agentId: validatedData.created_by_agent_id!,
+      agentName: creatorName,
       activityType: 'task_created',
       message: `Task created: ${validatedData.title}`,
       metadata: { title: validatedData.title, status, priority: validatedData.priority }
@@ -92,14 +89,18 @@ export async function POST(request: NextRequest) {
       if (assignedAgent) {
         await logActivity({
           taskId: id,
-          agentId: validatedData.created_by_agent_id,
-          agentName: creatorName || undefined,
+          agentId: validatedData.created_by_agent_id!,
+          agentName: creatorName,
           activityType: 'assigned',
           message: `Assigned to ${assignedAgent.name}`,
           metadata: { assignedAgentId, assignedAgentName: assignedAgent.name }
         });
       }
     }
+
+    // Log to events table for SSE broadcast
+    const eventMessage = `${creatorName} created task: ${validatedData.title}`;
+    await run(`INSERT INTO events (id, type, agent_id, task_id, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`, [uuidv4(), 'task_created', validatedData.created_by_agent_id, id, eventMessage]);
 
     const task = await queryOne<Task>(`SELECT t.*, aa.name as assigned_agent_name, aa.avatar_emoji as assigned_agent_emoji, ca.name as created_by_agent_name, ca.avatar_emoji as created_by_agent_emoji FROM tasks t LEFT JOIN agents aa ON t.assigned_agent_id = aa.id LEFT JOIN agents ca ON t.created_by_agent_id = ca.id WHERE t.id = $1`, [id]);
     
