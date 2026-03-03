@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 // Agent ID validation - accepts UUID or string ID (like "skippy")
 const AgentIdSchema = z.string().min(1, 'Agent ID is required');
 
